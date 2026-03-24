@@ -4,10 +4,9 @@ echo  repack - install / update
 echo ============================================================
 echo.
 
-:: Move to the folder where this bat file is located
 cd /d "%~dp0"
 
-:: ── [1/4] Check Python ──────────────────────────────────────
+:: [1/4] Check Python
 python --version >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] Python not found.
@@ -15,10 +14,9 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-for /f "tokens=*" %%v in ('python --version 2^>^&1') do echo Python: %%v
+echo [1/4] Python OK
 
-:: ── [2/4] Install / update packages ────────────────────────
-echo.
+:: [2/4] Install / update packages
 echo [2/4] Installing packages...
 python -m pip install --upgrade pyinstaller send2trash tomli --quiet
 if errorlevel 1 (
@@ -26,10 +24,9 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-echo       OK
+echo [2/4] Packages OK
 
-:: ── [3/4] Build exe ─────────────────────────────────────────
-echo.
+:: [3/4] Build exe
 echo [3/4] Building exe...
 python -m PyInstaller --onefile --console --name repack --hidden-import=tomli --hidden-import=send2trash --noconfirm repack.py
 if errorlevel 1 (
@@ -38,36 +35,29 @@ if errorlevel 1 (
     exit /b 1
 )
 
-:: Copy config to dist (only if not already present, to preserve user edits)
 if not exist "dist\config.toml" (
     copy /y config.toml dist\config.toml >nul
-    echo       config.toml copied to dist\
+    echo       config.toml copied.
 ) else (
-    echo       config.toml already exists in dist\ - skipped to preserve settings
+    echo       config.toml already exists - skipped to preserve settings.
 )
-echo       OK
+echo [3/4] Build OK
 
-:: ── [4/4] Register to SendTo ────────────────────────────────
-echo.
+:: [4/4] Register to SendTo
 echo [4/4] Registering to SendTo...
 set "EXE_PATH=%~dp0dist\repack.exe"
-set "SENDTO_DIR=%APPDATA%\Microsoft\Windows\SendTo"
-set "LNK_PATH=%SENDTO_DIR%\repack.lnk"
-
+set "LNK_PATH=%APPDATA%\Microsoft\Windows\SendTo\repack.lnk"
 powershell -NoProfile -Command "$ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut('%LNK_PATH%'); $sc.TargetPath = '%EXE_PATH%'; $sc.WorkingDirectory = '%~dp0dist'; $sc.Description = 'Repack to store ZIP'; $sc.Save()"
 if errorlevel 1 (
     echo [ERROR] Failed to register SendTo shortcut.
     pause
     exit /b 1
 )
-echo       Registered: %LNK_PATH%
-echo       OK
+echo [4/4] SendTo OK
 
-:: ── Done ────────────────────────────────────────────────────
 echo.
 echo ============================================================
-echo  Done!
-echo  Right-click a file in Explorer - Send to - repack
+echo  Done! Right-click a file - Send to - repack
 echo ============================================================
 echo.
 pause
