@@ -168,6 +168,9 @@ DEFAULT_CONFIG: dict = {
     # "keep" : 未分類ファイルを自動保持
     # "junk" : 未分類ファイルを自動削除
     "unknown_file_action": "ask",
+    # "counter" : archive (1).zip, archive (2).zip ...
+    # "date"    : archive_20241225.zip, archive_20241225 (1).zip ...
+    "duplicate_name_style": "counter",
     "write_log": False,
 }
 
@@ -180,8 +183,9 @@ def load_config(exe_dir: Path) -> dict:
         "junk_patterns":       list(DEFAULT_CONFIG["junk_patterns"]),
         "junk_dirs":           list(DEFAULT_CONFIG["junk_dirs"]),
         "allow_patterns":      list(DEFAULT_CONFIG["allow_patterns"]),
-        "unknown_file_action": DEFAULT_CONFIG["unknown_file_action"],
-        "write_log":           DEFAULT_CONFIG["write_log"],
+        "unknown_file_action":  DEFAULT_CONFIG["unknown_file_action"],
+        "duplicate_name_style": DEFAULT_CONFIG["duplicate_name_style"],
+        "write_log":            DEFAULT_CONFIG["write_log"],
     }
 
     # ── config.toml ────────────────────────────────────────
@@ -193,7 +197,7 @@ def load_config(exe_dir: Path) -> dict:
             for k in ("junk_patterns", "junk_dirs", "allow_patterns"):
                 if k in cfg:
                     config[k] = list(cfg[k])
-            for k in ("unknown_file_action", "write_log"):
+            for k in ("unknown_file_action", "duplicate_name_style", "write_log"):
                 if k in cfg:
                     config[k] = cfg[k]
             log(f"設定読み込み完了: {config_path}")
@@ -569,17 +573,29 @@ def is_already_store_zip(archive_path: Path) -> bool:
 # ============================================================
 # 重複しない出力パスの生成
 # ============================================================
-def _unique_path(path: Path) -> Path:
+def _unique_path(path: Path, style: str = "counter") -> Path:
     """
-    path が存在しなければそのまま返す。
-    存在する場合は "stem (1).ext", "stem (2).ext" ... と連番を付けて
-    存在しないパスを返す。既存ファイルは一切変更しない。
+    path が存在しなければそのまま返す。存在する場合は style に従い回避する。
+    既存ファイルは一切変更しない。
+
+    style="counter" : archive (1).zip, archive (2).zip ...
+    style="date"    : archive_20241225.zip,
+                      archive_20241225 (1).zip, archive_20241225 (2).zip ...
     """
     if not path.exists():
         return path
     parent = path.parent
     stem   = path.stem
     suffix = path.suffix
+
+    if style == "date":
+        date_str = datetime.now().strftime("%Y%m%d")
+        dated = parent / f"{stem}_{date_str}{suffix}"
+        if not dated.exists():
+            return dated
+        # 日付付きでも衝突するなら日付ベースに連番を付ける
+        stem = f"{stem}_{date_str}"
+
     counter = 1
     while True:
         candidate = parent / f"{stem} ({counter}){suffix}"
@@ -740,8 +756,9 @@ def process_file(
         log(f"  ゴミ箱へ送信: {archive_path.name}")
         send_to_recycle_bin(archive_path)
 
-        # ── 出力先パスを決定（同名ファイルがあれば連番で回避）────
-        output_path = _unique_path(archive_path.with_suffix(".zip"))
+        # ── 出力先パスを決定（同名ファイルがあれば設定に従い回避）──
+        style = config.get("duplicate_name_style", "counter")
+        output_path = _unique_path(archive_path.with_suffix(".zip"), style)
         if output_path != archive_path.with_suffix(".zip"):
             log(f"  同名ファイルが存在するため変更: {output_path.name}")
 
