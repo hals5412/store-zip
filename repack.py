@@ -37,6 +37,44 @@ if sys.platform == "win32":
     except Exception:
         pass
 
+
+# ── Tee ライター（コンソールとログファイルに同時出力）────────────────
+class _TeeWriter:
+    """stdout を置き換えてコンソールとログファイルに同時に書き込む。"""
+    def __init__(self, console, logfile):
+        self._console = console
+        self._logfile = logfile
+
+    def write(self, data: str) -> int:
+        self._console.write(data)
+        self._logfile.write(data)
+        return len(data)
+
+    def flush(self) -> None:
+        self._console.flush()
+        self._logfile.flush()
+
+    # TextIOWrapper が要求する属性を委譲
+    @property
+    def encoding(self):  return self._console.encoding
+    @property
+    def errors(self):    return self._console.errors
+    def fileno(self):    return self._console.fileno()
+    def isatty(self):    return False
+
+
+def setup_log_file(exe_dir: Path) -> None:
+    """write_log=true のとき呼び出す。repack.log への Tee を設定する。"""
+    log_path = exe_dir / "repack.log"
+    try:
+        lf = open(log_path, "a", encoding="utf-8")
+        lf.write(f"\n{'='*60}\n")
+        lf.write(f"  session: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        lf.write(f"{'='*60}\n")
+        sys.stdout = _TeeWriter(sys.stdout, lf)
+    except Exception as e:
+        print(f"警告: ログファイルを開けません ({e})", flush=True)
+
 # ── TOML パーサー ────────────────────────────────────────────────────
 try:
     import tomllib          # Python 3.11+ 標準
@@ -676,6 +714,9 @@ def main() -> None:
 
     # 設定読み込み
     config = load_config(exe_dir)
+
+    if config.get("write_log"):
+        setup_log_file(exe_dir)
 
     # 7-Zip 検出
     sevenzip = find_7zip(exe_dir)
