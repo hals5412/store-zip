@@ -87,22 +87,46 @@ except ImportError:
 
 # ============================================================
 # ログ出力ユーティリティ
+# スレッドローカルバッファが設定されているときはバッファに蓄積し、
+# ファイル処理完了後に _print_lock を取得して一括出力する。
+# これにより並列処理時もファイル単位でログがまとまって表示される。
 # ============================================================
+_thread_local = threading.local()
+
+
+def _emit(line: str) -> None:
+    """1行出力。バッファ中ならバッファへ、そうでなければ直接 stdout へ。"""
+    buf: list | None = getattr(_thread_local, "buffer", None)
+    if buf is not None:
+        buf.append(line)
+    else:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+
+
 def log(msg: str) -> None:
-    ts = datetime.now().strftime("%H:%M:%S")
-    print(f"[{ts}] {msg}", flush=True)
+    _emit(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n")
 
 def log_error(msg: str) -> None:
-    ts = datetime.now().strftime("%H:%M:%S")
-    print(f"[{ts}] ERROR: {msg}", flush=True)
+    _emit(f"[{datetime.now().strftime('%H:%M:%S')}] ERROR: {msg}\n")
 
 def log_ok(msg: str) -> None:
-    ts = datetime.now().strftime("%H:%M:%S")
-    print(f"[{ts}] OK: {msg}", flush=True)
+    _emit(f"[{datetime.now().strftime('%H:%M:%S')}] OK: {msg}\n")
 
 def log_skip(msg: str) -> None:
-    ts = datetime.now().strftime("%H:%M:%S")
-    print(f"[{ts}] SKIP: {msg}", flush=True)
+    _emit(f"[{datetime.now().strftime('%H:%M:%S')}] SKIP: {msg}\n")
+
+
+def _flush_buffer() -> None:
+    """スレッドローカルバッファの内容を _print_lock を取得して一括出力する。"""
+    buf: list | None = getattr(_thread_local, "buffer", None)
+    if not buf:
+        return
+    with _print_lock:
+        for line in buf:
+            sys.stdout.write(line)
+        sys.stdout.flush()
+    buf.clear()
 
 
 # ============================================================
@@ -309,6 +333,8 @@ def _ask_user_for_extension(pattern: str, example_fname: str) -> str:
     未分類の拡張子についてユーザーに確認する。"allow" または "junk" を返す。
     細かいファイル名単位の設定は config.toml で行う。
     """
+    # プロンプトを表示する前にバッファをフラッシュして文脈を見せる
+    _flush_buffer()
     print()
     print(f"  ┌─ 未分類の拡張子: {pattern}  （例: {example_fname}）")
     print( "  │  この拡張子は既存のルールに一致しませんでした。")
@@ -618,7 +644,7 @@ def process_file(
     config: dict,
     exe_dir: Path,
 ) -> bool:
-    print("-" * 60)
+    _emit("-" * 60 + "\n")
     log(f"処理開始: {archive_path.name}")
 
     ext = archive_path.suffix.lower()
@@ -735,33 +761,37 @@ def main() -> None:
     errors: list[str] = []
     n_workers = min(4, len(args))
 
-    if n_workers == 1:
-        # 1ファイルはスレッドオーバーヘッドなしで直接処理
-        p = Path(args[0])
+    def _run(arg: str) -> tuple[str, bool]:
+        """1ファイルをバッファ付きで処理し (name, ok) を返す。"""
+        p = Path(arg)
+        _thread_local.buffer = []
         try:
             ok = process_file(p, sevenzip, config, exe_dir)
-            if not ok:
-                errors.append(p.name)
         except Exception:
-            log_error(f"{p.name}: 予期しないエラー\n{traceback.format_exc()}")
-            errors.append(p.name)
+            log_error(f"予期しないエラー\n{traceback.format_exc()}")
+            ok = False
+        finally:
+            _flush_buffer()
+            _thread_local.buffer = None
+        return p.name, ok
+
+    if n_workers == 1:
+        name, ok = _run(args[0])
+        if not ok:
+            errors.append(name)
     else:
         log(f"並列処理開始: {len(args)} ファイル / {n_workers} ワーカー")
         print()
         with ThreadPoolExecutor(max_workers=n_workers) as executor:
-            futures = {
-                executor.submit(process_file, Path(a), sevenzip, config, exe_dir): Path(a).name
-                for a in args
-            }
+            futures = {executor.submit(_run, a): a for a in args}
             for future in as_completed(futures):
-                name = futures[future]
                 try:
-                    ok = future.result()
+                    name, ok = future.result()
                     if not ok:
                         errors.append(name)
                 except Exception:
-                    log_error(f"{name}: 予期しないエラー\n{traceback.format_exc()}")
-                    errors.append(name)
+                    log_error(f"予期しないエラー\n{traceback.format_exc()}")
+                    errors.append(Path(futures[future]).name)
 
     # 結果表示
     print()
