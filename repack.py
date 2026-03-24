@@ -23,6 +23,7 @@ import time
 import traceback
 import json
 import threading
+import ctypes
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
@@ -537,15 +538,17 @@ def remove_junk_from_dir(extract_dir: Path, config: dict, exe_dir: Path) -> int:
             log(f"  警告: ファイル削除失敗 {fpath.name}: {e}")
 
     # ── 3. 空ディレクトリを掃除 ──────────────────────────────
-    for dirpath, _, _ in os.walk(extract_dir, topdown=False):
-        if dirpath == str(extract_dir):
-            continue
-        p = Path(dirpath)
-        try:
-            if not any(p.iterdir()):
-                p.rmdir()
-        except Exception:
-            pass
+    if config.get("remove_empty_dirs", True):
+        for dirpath, _, _ in os.walk(extract_dir, topdown=False):
+            if dirpath == str(extract_dir):
+                continue
+            p = Path(dirpath)
+            try:
+                if not any(p.iterdir()):
+                    p.rmdir()
+                    log(f"  空フォルダ削除: {p.relative_to(extract_dir)}/")
+            except Exception:
+                pass
 
     return removed
 
@@ -765,8 +768,11 @@ def process_file(
         # ── 一時ZIP を最終パスへ移動 ─────────────────────────
         shutil.move(str(tmp_zip), str(output_path))
 
-        # ── タイムスタンプ復元 ───────────────────────────────
-        apply_timestamp(output_path, original_mtime)
+        # ── タイムスタンプ ───────────────────────────────────
+        if config.get("preserve_timestamp", True):
+            apply_timestamp(output_path, original_mtime)
+        else:
+            log("  タイムスタンプ: 処理日時のまま")
 
     log_ok(f"完了: {output_path.name}")
     return "converted"
@@ -775,6 +781,29 @@ def process_file(
 # ============================================================
 # エントリポイント
 # ============================================================
+# ── スリープ抑止（Windows のみ）────────────────────────────────────────
+_ES_CONTINUOUS     = 0x80000000
+_ES_SYSTEM_REQUIRED = 0x00000001
+
+def _prevent_sleep() -> None:
+    """処理中にシステムスリープが発生しないよう Windows に通知する。"""
+    if sys.platform == "win32":
+        try:
+            ctypes.windll.kernel32.SetThreadExecutionState(
+                _ES_CONTINUOUS | _ES_SYSTEM_REQUIRED
+            )
+        except Exception:
+            pass
+
+def _allow_sleep() -> None:
+    """スリープ抑止を解除する。"""
+    if sys.platform == "win32":
+        try:
+            ctypes.windll.kernel32.SetThreadExecutionState(_ES_CONTINUOUS)
+        except Exception:
+            pass
+
+
 def main() -> None:
     # exe のディレクトリを取得（PyInstaller でビルドした場合は sys.executable の親）
     if getattr(sys, "frozen", False):
@@ -837,19 +866,23 @@ def main() -> None:
 
     results: list[tuple[str, str]] = []  # (name, status)
 
-    if n_workers == 1:
-        results.append(_run(args[0]))
-    else:
-        log(f"並列処理開始: {len(args)} ファイル / {n_workers} ワーカー")
-        print()
-        with ThreadPoolExecutor(max_workers=n_workers) as executor:
-            futures = {executor.submit(_run, a): a for a in args}
-            for future in as_completed(futures):
-                try:
-                    results.append(future.result())
-                except Exception:
-                    log_error(f"予期しないエラー\n{traceback.format_exc()}")
-                    results.append((Path(futures[future]).name, "error"))
+    _prevent_sleep()
+    try:
+        if n_workers == 1:
+            results.append(_run(args[0]))
+        else:
+            log(f"並列処理開始: {len(args)} ファイル / {n_workers} ワーカー")
+            print()
+            with ThreadPoolExecutor(max_workers=n_workers) as executor:
+                futures = {executor.submit(_run, a): a for a in args}
+                for future in as_completed(futures):
+                    try:
+                        results.append(future.result())
+                    except Exception:
+                        log_error(f"予期しないエラー\n{traceback.format_exc()}")
+                        results.append((Path(futures[future]).name, "error"))
+    finally:
+        _allow_sleep()
 
     # ── サマリー表示 ────────────────────────────────────────
     converted = [(n, s) for n, s in results if s == "converted"]
