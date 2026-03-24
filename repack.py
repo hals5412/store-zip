@@ -193,8 +193,19 @@ def save_decision(exe_dir: Path, filename: str, decision: str) -> None:
 
 # ============================================================
 # セッションキャッシュ（同一バッチ内での重複確認を防ぐ）
+# キーは拡張子パターン（例: "*.txt"）。拡張子なしはファイル名そのまま。
 # ============================================================
-_session_cache: dict[str, str] = {}  # filename → "allow" | "junk"
+_session_cache: dict[str, str] = {}  # "*.ext" or filename → "allow" | "junk"
+
+
+def _ext_pattern(fname: str) -> str:
+    """
+    ファイル名から拡張子パターンを生成する。
+      "image.jpg"  →  "*.jpg"
+      "Makefile"   →  "Makefile"  （拡張子なし → ファイル名そのまま）
+    """
+    suffix = Path(fname).suffix.lower()
+    return f"*{suffix}" if suffix else fname
 
 
 def get_file_decision(fname: str, config: dict, exe_dir: Path) -> str:
@@ -204,47 +215,51 @@ def get_file_decision(fname: str, config: dict, exe_dir: Path) -> str:
       - "junk"  : 削除する
 
     判定順序:
-      1. セッションキャッシュ（同バッチで既に決定済み）
-      2. allow_patterns（junk_patterns より優先）
-      3. junk_patterns
-      4. 未分類 → unknown_file_action に従い自動判断 or ユーザー確認
+      1. allow_patterns（junk_patterns より優先）
+      2. junk_patterns
+      3. 未分類 → 拡張子単位でセッションキャッシュを確認
+      4.          キャッシュになければ unknown_file_action に従い自動判断 or ユーザー確認
     """
-    # 1. セッションキャッシュ
-    if fname in _session_cache:
-        return _session_cache[fname]
-
-    # 2. allow_patterns（保持を強制）
+    # 1. allow_patterns（保持を強制）
     if _matches_any(fname, config["allow_patterns"]):
-        _session_cache[fname] = "allow"
         return "allow"
 
-    # 3. junk_patterns
+    # 2. junk_patterns
     if _matches_any(fname, config["junk_patterns"]):
-        _session_cache[fname] = "junk"
         return "junk"
 
-    # 4. 未分類
+    # 3. 未分類 → 拡張子パターンで判断
+    pattern = _ext_pattern(fname)
+
+    if pattern in _session_cache:
+        return _session_cache[pattern]
+
+    # 4. ユーザー確認 or 自動判断
     action = config.get("unknown_file_action", "ask")
     if action == "keep":
         decision = "allow"
-        log(f"  自動保持 (unknown_file_action=keep): {fname}")
+        log(f"  自動保持 (unknown_file_action=keep): {pattern}")
     elif action == "junk":
         decision = "junk"
-        log(f"  自動削除 (unknown_file_action=junk): {fname}")
+        log(f"  自動削除 (unknown_file_action=junk): {pattern}")
     else:
-        decision = _ask_user_for_file(fname)
+        decision = _ask_user_for_extension(pattern, fname)
 
-    _session_cache[fname] = decision
-    save_decision(exe_dir, fname, decision)
+    _session_cache[pattern] = decision
+    save_decision(exe_dir, pattern, decision)
     return decision
 
 
-def _ask_user_for_file(fname: str) -> str:
-    """未分類ファイルの処理をユーザーに確認する。"allow" または "junk" を返す。"""
+def _ask_user_for_extension(pattern: str, example_fname: str) -> str:
+    """
+    未分類の拡張子についてユーザーに確認する。"allow" または "junk" を返す。
+    細かいファイル名単位の設定は config.toml で行う。
+    """
     print()
-    print(f"  ┌─ 未分類ファイル: {fname}")
-    print( "  │  このファイルは既存のルールに一致しませんでした。")
-    print( "  │  選択した内容は decisions.json に保存され、次回から自動適用されます。")
+    print(f"  ┌─ 未分類の拡張子: {pattern}  （例: {example_fname}）")
+    print( "  │  この拡張子は既存のルールに一致しませんでした。")
+    print( "  │  同じ拡張子のファイルすべてに適用されます。")
+    print( "  │  より細かい設定は config.toml を直接編集してください。")
     print( "  ├─ [K] 保持する（allow_patterns に追加）")
     print( "  └─ [D] 削除する（junk_patterns に追加）")
 
@@ -253,7 +268,7 @@ def _ask_user_for_file(fname: str) -> str:
             sys.stdout.flush()
             choice = input("  選択 [K/D]: ").strip().upper()
         except (EOFError, KeyboardInterrupt):
-            log(f"  入力なし。今回は保持します: {fname}")
+            log(f"  入力なし。今回は保持します: {pattern}")
             return "allow"
 
         if choice in ("K", "KEEP"):
