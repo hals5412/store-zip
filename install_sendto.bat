@@ -25,13 +25,7 @@ echo SendTo: %SENDTO_DIR%
 :: Create shortcut via PowerShell
 echo.
 echo Creating shortcut...
-powershell -NoProfile -Command ^
-    "$ws = New-Object -ComObject WScript.Shell; ^
-     $sc = $ws.CreateShortcut('%SENDTO_DIR%\repack.lnk'); ^
-     $sc.TargetPath = '%EXE_PATH%'; ^
-     $sc.WorkingDirectory = Split-Path '%EXE_PATH%'; ^
-     $sc.Description = 'Repack to store ZIP'; ^
-     $sc.Save()"
+powershell -NoProfile -Command "$ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut('%SENDTO_DIR%\repack.lnk'); $sc.TargetPath = '%EXE_PATH%'; $sc.WorkingDirectory = Split-Path '%EXE_PATH%'; $sc.Description = 'Repack to store ZIP'; $sc.Save()"
 
 if errorlevel 1 (
     echo [ERROR] Failed to create shortcut.
