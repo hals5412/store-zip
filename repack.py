@@ -336,11 +336,8 @@ _ZIP_LIKE_EXTENSIONS = frozenset({".zip", ".cbz"})
 def _to_7zip_path(path: Path) -> str:
     """
     7-Zip に渡すパス文字列を返す。
-    UNCパス (\\server\share\...) は \\?\UNC\server\share\... 形式に変換する。
-    これにより:
-      - MAX_PATH (260文字) 制限を回避
-      - 日本語・特殊文字を含むUNCパスの Windows API エラーを回避
-      - ファイルコピー不要で直接処理できる
+    UNCパスは拡張形式 (prefix \\\\?\\UNC\\) に変換する。
+    これにより MAX_PATH 制限・日本語パスの Windows API エラーを回避できる。
     """
     s = str(path)
     if s.startswith("\\\\") and not s.startswith("\\\\?\\"):
@@ -355,7 +352,7 @@ def extract_with_7zip(sevenzip: str, archive: Path, dest_dir: Path) -> bool:
     文字コード対策:
       -mcp=932 : ZIP のファイル名を Shift-JIS として解釈する（ZIP系のみ）。
                  RAR/7z 等には適用しない（誤動作の原因になり得るため）。
-      UNCパス  : \\?\UNC\ 拡張形式に変換してパス制限・文字コード問題を回避。
+      UNCパス  : 拡張UNCパス形式に変換してパス制限・文字コード問題を回避。
     """
     cmd = [
         sevenzip, "x", _to_7zip_path(archive),
