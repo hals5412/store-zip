@@ -1,51 +1,48 @@
 @echo off
-chcp 65001 >nul
 echo ============================================================
-echo  repack を SendTo に登録します
+echo  repack - register to SendTo
 echo ============================================================
 echo.
 
-:: repack.exe の場所を確認
+:: Find repack.exe
 set "EXE_PATH=%~dp0dist\repack.exe"
 if not exist "%EXE_PATH%" (
-    :: dist フォルダがない場合、同じフォルダを確認
     set "EXE_PATH=%~dp0repack.exe"
     if not exist "%EXE_PATH%" (
-        echo [ERROR] repack.exe が見つかりません。
-        echo   先に build.bat を実行してください。
+        echo [ERROR] repack.exe not found.
+        echo   Run build.bat first.
         pause
         exit /b 1
     )
 )
 
-echo repack.exe のパス: %EXE_PATH%
+echo repack.exe: %EXE_PATH%
 
-:: SendTo フォルダのパスを取得
+:: SendTo folder
 set "SENDTO_DIR=%APPDATA%\Microsoft\Windows\SendTo"
-echo SendTo フォルダ: %SENDTO_DIR%
+echo SendTo: %SENDTO_DIR%
 
-:: ショートカットを作成 (PowerShell 使用)
+:: Create shortcut via PowerShell
 echo.
-echo ショートカットを作成中...
+echo Creating shortcut...
 powershell -NoProfile -Command ^
     "$ws = New-Object -ComObject WScript.Shell; ^
-     $sc = $ws.CreateShortcut('%SENDTO_DIR%\repack (無圧縮ZIP変換).lnk'); ^
+     $sc = $ws.CreateShortcut('%SENDTO_DIR%\repack.lnk'); ^
      $sc.TargetPath = '%EXE_PATH%'; ^
      $sc.WorkingDirectory = Split-Path '%EXE_PATH%'; ^
-     $sc.Description = '圧縮ファイルを無圧縮ZIPに変換'; ^
+     $sc.Description = 'Repack to store ZIP'; ^
      $sc.Save()"
 
 if errorlevel 1 (
-    echo [ERROR] ショートカットの作成に失敗しました。
+    echo [ERROR] Failed to create shortcut.
     pause
     exit /b 1
 )
 
 echo.
 echo ============================================================
-echo  登録完了！
-echo  エクスプローラーで圧縮ファイルを右クリック
-echo  → 「送る」→「repack (無圧縮ZIP変換)」で使用できます。
+echo  Done!
+echo  Right-click a file in Explorer - Send to - repack
 echo ============================================================
 echo.
 pause

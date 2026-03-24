@@ -1,31 +1,30 @@
 @echo off
-chcp 65001 >nul
 echo ============================================================
-echo  repack.exe ビルドスクリプト
+echo  repack - build script
 echo ============================================================
 echo.
 
-:: Python の確認
+:: Check Python
 python --version >nul 2>&1
 if errorlevel 1 (
-    echo [ERROR] Python が見つかりません。
-    echo   https://www.python.org/ からインストールしてください。
+    echo [ERROR] Python not found.
+    echo   Install from: https://www.python.org/
     pause
     exit /b 1
 )
 
-:: 必要なパッケージのインストール
-echo [1/3] 依存パッケージをインストール中...
+:: Install dependencies
+echo [1/3] Installing packages...
 pip install pyinstaller send2trash tomli --quiet
 if errorlevel 1 (
-    echo [ERROR] パッケージのインストールに失敗しました。
+    echo [ERROR] Package installation failed.
     pause
     exit /b 1
 )
-echo      OK
+echo       OK
 
-:: PyInstaller でビルド
-echo [2/3] exe をビルド中...
+:: Build with PyInstaller
+echo [2/3] Building exe...
 pyinstaller ^
     --onefile ^
     --console ^
@@ -35,22 +34,22 @@ pyinstaller ^
     repack.py
 
 if errorlevel 1 (
-    echo [ERROR] ビルドに失敗しました。
+    echo [ERROR] Build failed.
     pause
     exit /b 1
 )
-echo      OK
+echo       OK
 
-:: dist フォルダに config.toml をコピー
-echo [3/3] 設定ファイルをコピー中...
+:: Copy config to dist
+echo [3/3] Copying config...
 copy /y config.toml dist\config.toml >nul
-echo      OK
+echo       OK
 
 echo.
 echo ============================================================
-echo  ビルド完了！
-echo  dist\repack.exe と dist\config.toml を同じフォルダに置いて使用してください。
-echo  次に install_sendto.bat を実行してください。
+echo  Build complete!
+echo  Place dist\repack.exe and dist\config.toml in the same folder.
+echo  Then run install_sendto.bat
 echo ============================================================
 echo.
 pause
