@@ -25,7 +25,7 @@ echo       OK
 
 :: Build with PyInstaller
 echo [2/3] Building exe...
-pyinstaller ^
+python -m PyInstaller ^
     --onefile ^
     --console ^
     --name repack ^
