@@ -548,8 +548,18 @@ def process_file(
         extract_dir = tmp_path / "extracted"
         extract_dir.mkdir()
 
+        # ── UNCネットワークパスの場合はローカルにコピーしてから処理 ──
+        # 7-Zip は UNC パス (\\server\share\...) を直接開けない場合がある
+        work_archive = archive_path
+        if str(archive_path).startswith("\\\\"):
+            local_copy = tmp_path / archive_path.name
+            log(f"  ネットワークパス検出。ローカルへコピー中 ({archive_path.stat().st_size / 1024 / 1024:.0f} MB)...")
+            shutil.copy2(str(archive_path), str(local_copy))
+            work_archive = local_copy
+            log(f"  コピー完了: {local_copy}")
+
         # ── 展開 ──────────────────────────────────────────────
-        if not extract_with_7zip(sevenzip, archive_path, extract_dir):
+        if not extract_with_7zip(sevenzip, work_archive, extract_dir):
             return False
 
         # ── ゴミ除去 ──────────────────────────────────────────
