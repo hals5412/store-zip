@@ -118,11 +118,11 @@ def log_skip(msg: str) -> None:
 
 
 def _flush_buffer() -> None:
-    """スレッドローカルバッファの内容を _print_lock を取得して一括出力する。"""
+    """スレッドローカルバッファの内容を _output_lock を取得して一括出力する。"""
     buf: list | None = getattr(_thread_local, "buffer", None)
     if not buf:
         return
-    with _print_lock:
+    with _output_lock:
         for line in buf:
             sys.stdout.write(line)
         sys.stdout.flush()
@@ -262,11 +262,13 @@ def save_decision(exe_dir: Path, filename: str, decision: str) -> None:
 # キーは拡張子パターン（例: "*.txt"）。拡張子なしはファイル名そのまま。
 # 並列処理時のスレッド安全のためロックで保護する。
 # ============================================================
-_session_cache: dict[str, str] = {}  # "*.ext" or filename → "allow" | "junk"
-_cache_lock    = threading.Lock()  # _session_cache の読み書き保護
-_prompt_lock   = threading.Lock()  # 対話プロンプトを同時に1つだけ表示する
+_session_cache  = {}             # "*.ext" or filename → "allow" | "junk"
+_cache_lock     = threading.Lock()  # _session_cache の読み書き保護
 _decisions_lock = threading.Lock()  # decisions.json の読み書き保護
-_print_lock    = threading.Lock()  # ファイル単位のログブロックを崩さない
+# stdout への書き込みをすべて排他制御する1本のロック。
+# バッファフラッシュとプロンプトで共用することで、
+# プロンプト表示中に他スレッドの出力が割り込まなくなる。
+_output_lock    = threading.Lock()
 
 
 def _ext_pattern(fname: str) -> str:
@@ -315,12 +317,11 @@ def get_file_decision(fname: str, config: dict, exe_dir: Path) -> str:
         decision = "junk"
         log(f"  自動削除 (unknown_file_action=junk): {pattern}")
     else:
-        # プロンプトは同時に1つだけ。ロック取得後にキャッシュを再確認（別スレッドが先に答えた可能性）
-        with _prompt_lock:
+        decision = _ask_user_for_extension(pattern, fname)
+        # _ask_user_for_extension 内でキャッシュに入っていた場合は None が返る
+        if decision is None:
             with _cache_lock:
-                if pattern in _session_cache:
-                    return _session_cache[pattern]
-            decision = _ask_user_for_extension(pattern, fname)
+                return _session_cache[pattern]
 
     with _cache_lock:
         _session_cache[pattern] = decision
@@ -328,34 +329,51 @@ def get_file_decision(fname: str, config: dict, exe_dir: Path) -> str:
     return decision
 
 
-def _ask_user_for_extension(pattern: str, example_fname: str) -> str:
+def _ask_user_for_extension(pattern: str, example_fname: str) -> str | None:
     """
-    未分類の拡張子についてユーザーに確認する。"allow" または "junk" を返す。
-    細かいファイル名単位の設定は config.toml で行う。
-    """
-    # プロンプトを表示する前にバッファをフラッシュして文脈を見せる
-    _flush_buffer()
-    print()
-    print(f"  ┌─ 未分類の拡張子: {pattern}  （例: {example_fname}）")
-    print( "  │  この拡張子は既存のルールに一致しませんでした。")
-    print( "  │  同じ拡張子のファイルすべてに適用されます。")
-    print( "  │  より細かい設定は config.toml を直接編集してください。")
-    print( "  ├─ [K] 保持する（allow_patterns に追加）")
-    print( "  └─ [D] 削除する（junk_patterns に追加）")
+    未分類の拡張子についてユーザーに確認する。
+    _output_lock をプロンプト全体（input() 中も含む）で保持するため、
+    ユーザーが回答するまで他スレッドの出力はブロックされる。
 
-    while True:
-        try:
+    戻り値: "allow" / "junk"、またはロック待機中に別スレッドが回答済みなら None
+    """
+    with _output_lock:
+        # _output_lock 待機中に別スレッドが同じ拡張子を回答した可能性を確認
+        with _cache_lock:
+            if pattern in _session_cache:
+                return None  # 呼び出し元でキャッシュ値を使う
+
+        # スレッドローカルバッファをここでフラッシュ（ロック内なので安全）
+        buf: list | None = getattr(_thread_local, "buffer", None)
+        if buf:
+            for line in buf:
+                sys.stdout.write(line)
             sys.stdout.flush()
-            choice = input("  選択 [K/D]: ").strip().upper()
-        except (EOFError, KeyboardInterrupt):
-            log(f"  入力なし。今回は保持します: {pattern}")
-            return "allow"
+            buf.clear()
 
-        if choice in ("K", "KEEP"):
-            return "allow"
-        if choice in ("D", "DELETE", "DEL"):
-            return "junk"
-        print("  K（保持）か D（削除）を入力してください。")
+        sys.stdout.write("\n")
+        sys.stdout.write(f"  ┌─ 未分類の拡張子: {pattern}  （例: {example_fname}）\n")
+        sys.stdout.write( "  │  この拡張子は既存のルールに一致しませんでした。\n")
+        sys.stdout.write( "  │  同じ拡張子のファイルすべてに適用されます。\n")
+        sys.stdout.write( "  │  より細かい設定は config.toml を直接編集してください。\n")
+        sys.stdout.write( "  ├─ [K] 保持する（allow_patterns に追加）\n")
+        sys.stdout.write( "  └─ [D] 削除する（junk_patterns に追加）\n")
+        sys.stdout.flush()
+
+        while True:
+            try:
+                choice = input("  選択 [K/D]: ").strip().upper()
+            except (EOFError, KeyboardInterrupt):
+                sys.stdout.write(f"  入力なし。今回は保持します: {pattern}\n")
+                sys.stdout.flush()
+                return "allow"
+
+            if choice in ("K", "KEEP"):
+                return "allow"
+            if choice in ("D", "DELETE", "DEL"):
+                return "junk"
+            sys.stdout.write("  K（保持）か D（削除）を入力してください。\n")
+            sys.stdout.flush()
 
 
 def _matches_any(filename: str, patterns: list) -> bool:
