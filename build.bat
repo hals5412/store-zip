@@ -15,7 +15,7 @@ if errorlevel 1 (
 
 :: Install dependencies
 echo [1/3] Installing packages...
-pip install pyinstaller send2trash tomli --quiet
+python -m pip install pyinstaller send2trash tomli --quiet
 if errorlevel 1 (
     echo [ERROR] Package installation failed.
     pause
