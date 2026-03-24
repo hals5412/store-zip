@@ -329,24 +329,43 @@ SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({
 # ============================================================
 # 7-Zip による展開（文字コード問題対策済み）
 # ============================================================
+# -mcp=932 が有効な形式（ZIP のファイル名エンコーディング指定）
+_ZIP_LIKE_EXTENSIONS = frozenset({".zip", ".cbz"})
+
+
+def _to_7zip_path(path: Path) -> str:
+    """
+    7-Zip に渡すパス文字列を返す。
+    UNCパス (\\server\share\...) は \\?\UNC\server\share\... 形式に変換する。
+    これにより:
+      - MAX_PATH (260文字) 制限を回避
+      - 日本語・特殊文字を含むUNCパスの Windows API エラーを回避
+      - ファイルコピー不要で直接処理できる
+    """
+    s = str(path)
+    if s.startswith("\\\\") and not s.startswith("\\\\?\\"):
+        return "\\\\?\\UNC\\" + s[2:]
+    return s
+
+
 def extract_with_7zip(sevenzip: str, archive: Path, dest_dir: Path) -> bool:
     """
     7-Zip でアーカイブを展開する。
 
     文字コード対策:
-      -mcp=932 : ZIPファイルのファイル名を Shift-JIS として解釈する。
-                 EFSビット（UTF-8フラグ）が立っているアーカイブには影響せず、
-                 古い日本語ZIPの文字化けを防ぐ。
-      capture_output=True : stdout/stderr をバイト列で受け取り、
-                            decode_bytes() で最適なエンコーディングを選択する。
+      -mcp=932 : ZIP のファイル名を Shift-JIS として解釈する（ZIP系のみ）。
+                 RAR/7z 等には適用しない（誤動作の原因になり得るため）。
+      UNCパス  : \\?\UNC\ 拡張形式に変換してパス制限・文字コード問題を回避。
     """
     cmd = [
-        sevenzip, "x", str(archive),
-        f"-o{dest_dir}",
-        "-y",        # すべての確認プロンプトに Yes
-        "-aoa",      # 既存ファイルを上書き
-        "-mcp=932",  # Shift-JIS コードページ（EFSビットなし旧ZIPのファイル名対策）
+        sevenzip, "x", _to_7zip_path(archive),
+        f"-o{_to_7zip_path(dest_dir)}",
+        "-y",    # すべての確認プロンプトに Yes
+        "-aoa",  # 既存ファイルを上書き
     ]
+    # -mcp=932 は ZIP 系のみ（EFSビットなし旧日本語ZIPのファイル名文字化け対策）
+    if archive.suffix.lower() in _ZIP_LIKE_EXTENSIONS:
+        cmd.append("-mcp=932")
 
     log(f"  展開中: {archive.name}")
 
@@ -548,18 +567,8 @@ def process_file(
         extract_dir = tmp_path / "extracted"
         extract_dir.mkdir()
 
-        # ── UNCネットワークパスの場合はローカルにコピーしてから処理 ──
-        # 7-Zip は UNC パス (\\server\share\...) を直接開けない場合がある
-        work_archive = archive_path
-        if str(archive_path).startswith("\\\\"):
-            local_copy = tmp_path / archive_path.name
-            log(f"  ネットワークパス検出。ローカルへコピー中 ({archive_path.stat().st_size / 1024 / 1024:.0f} MB)...")
-            shutil.copy2(str(archive_path), str(local_copy))
-            work_archive = local_copy
-            log(f"  コピー完了: {local_copy}")
-
         # ── 展開 ──────────────────────────────────────────────
-        if not extract_with_7zip(sevenzip, work_archive, extract_dir):
+        if not extract_with_7zip(sevenzip, archive_path, extract_dir):
             return False
 
         # ── ゴミ除去 ──────────────────────────────────────────
