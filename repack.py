@@ -22,6 +22,8 @@ import fnmatch
 import time
 import traceback
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
 
@@ -170,32 +172,39 @@ def save_decision(exe_dir: Path, filename: str, decision: str) -> None:
     """
     ユーザーが対話的に決定したファイル名を decisions.json に追記する。
     decision : "allow" または "junk"
+    並列処理時の競合を防ぐため _decisions_lock で保護する。
     """
-    decisions_path = exe_dir / "decisions.json"
-    existing: dict = {"allow_patterns": [], "junk_patterns": []}
+    with _decisions_lock:
+        decisions_path = exe_dir / "decisions.json"
+        existing: dict = {"allow_patterns": [], "junk_patterns": []}
 
-    if decisions_path.exists():
-        try:
-            with open(decisions_path, "r", encoding="utf-8") as f:
-                existing = json.load(f)
-        except Exception:
-            pass
+        if decisions_path.exists():
+            try:
+                with open(decisions_path, "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+            except Exception:
+                pass
 
-    key = "allow_patterns" if decision == "allow" else "junk_patterns"
-    if filename not in existing.get(key, []):
-        existing.setdefault(key, []).append(filename)
-        try:
-            with open(decisions_path, "w", encoding="utf-8") as f:
-                json.dump(existing, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            log(f"警告: decisions.json の保存に失敗 ({e})")
+        key = "allow_patterns" if decision == "allow" else "junk_patterns"
+        if filename not in existing.get(key, []):
+            existing.setdefault(key, []).append(filename)
+            try:
+                with open(decisions_path, "w", encoding="utf-8") as f:
+                    json.dump(existing, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                log(f"警告: decisions.json の保存に失敗 ({e})")
 
 
 # ============================================================
 # セッションキャッシュ（同一バッチ内での重複確認を防ぐ）
 # キーは拡張子パターン（例: "*.txt"）。拡張子なしはファイル名そのまま。
+# 並列処理時のスレッド安全のためロックで保護する。
 # ============================================================
 _session_cache: dict[str, str] = {}  # "*.ext" or filename → "allow" | "junk"
+_cache_lock    = threading.Lock()  # _session_cache の読み書き保護
+_prompt_lock   = threading.Lock()  # 対話プロンプトを同時に1つだけ表示する
+_decisions_lock = threading.Lock()  # decisions.json の読み書き保護
+_print_lock    = threading.Lock()  # ファイル単位のログブロックを崩さない
 
 
 def _ext_pattern(fname: str) -> str:
@@ -231,8 +240,9 @@ def get_file_decision(fname: str, config: dict, exe_dir: Path) -> str:
     # 3. 未分類 → 拡張子パターンで判断
     pattern = _ext_pattern(fname)
 
-    if pattern in _session_cache:
-        return _session_cache[pattern]
+    with _cache_lock:
+        if pattern in _session_cache:
+            return _session_cache[pattern]
 
     # 4. ユーザー確認 or 自動判断
     action = config.get("unknown_file_action", "ask")
@@ -243,9 +253,15 @@ def get_file_decision(fname: str, config: dict, exe_dir: Path) -> str:
         decision = "junk"
         log(f"  自動削除 (unknown_file_action=junk): {pattern}")
     else:
-        decision = _ask_user_for_extension(pattern, fname)
+        # プロンプトは同時に1つだけ。ロック取得後にキャッシュを再確認（別スレッドが先に答えた可能性）
+        with _prompt_lock:
+            with _cache_lock:
+                if pattern in _session_cache:
+                    return _session_cache[pattern]
+            decision = _ask_user_for_extension(pattern, fname)
 
-    _session_cache[pattern] = decision
+    with _cache_lock:
+        _session_cache[pattern] = decision
     save_decision(exe_dir, pattern, decision)
     return decision
 
@@ -449,6 +465,26 @@ def remove_junk_from_dir(extract_dir: Path, config: dict, exe_dir: Path) -> int:
 
 
 # ============================================================
+# 無圧縮ZIP判定
+# ============================================================
+def is_already_store_zip(archive_path: Path) -> bool:
+    """
+    ZIPファイルの全エントリが STORE（無圧縮）なら True を返す。
+    ZIP/CBZ 以外は常に False（処理対象）。
+    """
+    if archive_path.suffix.lower() not in {".zip", ".cbz"}:
+        return False
+    try:
+        with zipfile.ZipFile(archive_path, "r") as zf:
+            infos = zf.infolist()
+            if not infos:
+                return False
+            return all(info.compress_type == zipfile.ZIP_STORED for info in infos)
+    except Exception:
+        return False
+
+
+# ============================================================
 # ルートフォルダ剥がし
 # ============================================================
 def strip_root_folder(extract_dir: Path) -> Path:
@@ -556,6 +592,10 @@ def process_file(
         log_error(f"ファイルが見つかりません: {archive_path}")
         return False
 
+    if is_already_store_zip(archive_path):
+        log_skip(f"既に無圧縮ZIPです。スキップします。")
+        return True
+
     # 元ファイルのタイムスタンプを保存
     original_mtime = archive_path.stat().st_mtime
 
@@ -648,10 +688,15 @@ def main() -> None:
     log(f"7-Zip: {sevenzip}")
     print()
 
-    # ファイルを順次処理
+    # ファイルを並列処理
+    # I/Oバウンドな処理なのでスレッドで十分。
+    # ワーカー数はファイル数と上限(4)の小さい方。
     errors: list[str] = []
-    for arg in args:
-        p = Path(arg)
+    n_workers = min(4, len(args))
+
+    if n_workers == 1:
+        # 1ファイルはスレッドオーバーヘッドなしで直接処理
+        p = Path(args[0])
         try:
             ok = process_file(p, sevenzip, config, exe_dir)
             if not ok:
@@ -659,6 +704,23 @@ def main() -> None:
         except Exception:
             log_error(f"{p.name}: 予期しないエラー\n{traceback.format_exc()}")
             errors.append(p.name)
+    else:
+        log(f"並列処理開始: {len(args)} ファイル / {n_workers} ワーカー")
+        print()
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            futures = {
+                executor.submit(process_file, Path(a), sevenzip, config, exe_dir): Path(a).name
+                for a in args
+            }
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    ok = future.result()
+                    if not ok:
+                        errors.append(name)
+                except Exception:
+                    log_error(f"{name}: 予期しないエラー\n{traceback.format_exc()}")
+                    errors.append(name)
 
     # 結果表示
     print()
