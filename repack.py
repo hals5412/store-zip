@@ -643,22 +643,28 @@ def process_file(
     sevenzip: str,
     config: dict,
     exe_dir: Path,
-) -> bool:
+) -> str:
+    """
+    戻り値:
+      "converted" : 変換完了
+      "skipped"   : スキップ（無圧縮ZIP済み・非対応形式・空アーカイブ）
+      "error"     : 失敗
+    """
     _emit("-" * 60 + "\n")
     log(f"処理開始: {archive_path.name}")
 
     ext = archive_path.suffix.lower()
     if ext not in SUPPORTED_EXTENSIONS:
         log_skip(f"非対応形式: {ext}")
-        return True
+        return "skipped"
 
     if not archive_path.exists():
         log_error(f"ファイルが見つかりません: {archive_path}")
-        return False
+        return "error"
 
     if is_already_store_zip(archive_path):
         log_skip(f"既に無圧縮ZIPです。スキップします。")
-        return True
+        return "skipped"
 
     # 元ファイルのタイムスタンプを保存
     original_mtime = archive_path.stat().st_mtime
@@ -670,7 +676,7 @@ def process_file(
 
         # ── 展開 ──────────────────────────────────────────────
         if not extract_with_7zip(sevenzip, archive_path, extract_dir):
-            return False
+            return "error"
 
         # ── ゴミ除去 ──────────────────────────────────────────
         removed = remove_junk_from_dir(extract_dir, config, exe_dir)
@@ -681,7 +687,7 @@ def process_file(
         remaining_files = [f for f in extract_dir.rglob("*") if f.is_file()]
         if not remaining_files:
             log("  ゴミ除去後にファイルが残りませんでした。元ファイルは変更しません。")
-            return True
+            return "skipped"
 
         # ── ルートフォルダ剥がし ──────────────────────────────
         actual_root = strip_root_folder(extract_dir)
@@ -709,7 +715,7 @@ def process_file(
         apply_timestamp(output_path, original_mtime)
 
     log_ok(f"完了: {output_path.name}")
-    return True
+    return "converted"
 
 
 # ============================================================
@@ -761,24 +767,24 @@ def main() -> None:
     errors: list[str] = []
     n_workers = min(4, len(args))
 
-    def _run(arg: str) -> tuple[str, bool]:
-        """1ファイルをバッファ付きで処理し (name, ok) を返す。"""
+    def _run(arg: str) -> tuple[str, str]:
+        """1ファイルをバッファ付きで処理し (name, status) を返す。"""
         p = Path(arg)
         _thread_local.buffer = []
         try:
-            ok = process_file(p, sevenzip, config, exe_dir)
+            status = process_file(p, sevenzip, config, exe_dir)
         except Exception:
             log_error(f"予期しないエラー\n{traceback.format_exc()}")
-            ok = False
+            status = "error"
         finally:
             _flush_buffer()
             _thread_local.buffer = None
-        return p.name, ok
+        return p.name, status
+
+    results: list[tuple[str, str]] = []  # (name, status)
 
     if n_workers == 1:
-        name, ok = _run(args[0])
-        if not ok:
-            errors.append(name)
+        results.append(_run(args[0]))
     else:
         log(f"並列処理開始: {len(args)} ファイル / {n_workers} ワーカー")
         print()
@@ -786,32 +792,38 @@ def main() -> None:
             futures = {executor.submit(_run, a): a for a in args}
             for future in as_completed(futures):
                 try:
-                    name, ok = future.result()
-                    if not ok:
-                        errors.append(name)
+                    results.append(future.result())
                 except Exception:
                     log_error(f"予期しないエラー\n{traceback.format_exc()}")
-                    errors.append(Path(futures[future]).name)
+                    results.append((Path(futures[future]).name, "error"))
 
-    # 結果表示
+    # ── サマリー表示 ────────────────────────────────────────
+    converted = [(n, s) for n, s in results if s == "converted"]
+    skipped   = [(n, s) for n, s in results if s == "skipped"]
+    errors    = [(n, s) for n, s in results if s == "error"]
+
     print()
     print("=" * 60)
+    print(f"  [結果] 変換: {len(converted)}件  スキップ: {len(skipped)}件  エラー: {len(errors)}件")
+    print()
+
+    if converted:
+        print(f"  変換完了 ({len(converted)}件):")
+        for name, _ in converted:
+            print(f"    [OK]   {name}")
+    if skipped:
+        print(f"  スキップ ({len(skipped)}件):")
+        for name, _ in skipped:
+            print(f"    [--]   {name}")
     if errors:
-        print(f"  [!] エラーが発生したファイル: {len(errors)} 件")
-        for name in errors:
-            print(f"      - {name}")
-        print()
-        input("Enter キーで終了...")
-        sys.exit(1)
-    else:
-        processed = sum(
-            1 for a in args
-            if Path(a).suffix.lower() in SUPPORTED_EXTENSIONS
-        )
-        print(f"  すべての処理が完了しました。（{processed} ファイル）")
-        print("  3秒後に自動で閉じます...")
-        time.sleep(3)
-        sys.exit(0)
+        print(f"  エラー ({len(errors)}件):")
+        for name, _ in errors:
+            print(f"    [ERR]  {name}")
+
+    print()
+    print("=" * 60)
+    input("Enter キーで終了...")
+    sys.exit(1 if errors else 0)
 
 
 if __name__ == "__main__":
