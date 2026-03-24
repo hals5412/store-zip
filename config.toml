@@ -31,8 +31,21 @@ unknown_file_action = "ask"
 # ※ 対話的に「保持」を選択したものは decisions.json に自動追加されます。
 # -------------------------------------------------------------
 allow_patterns = [
-    # 例: "cover.jpg"   -- この名前は常に保持
-    # 例: "*.png"       -- すべての PNG を保持
+    # ── 画像ファイル（無条件で保持）────────────────────────
+    "*.jpg", "*.jpeg", "*.jpe", "*.jfif",
+    "*.png",
+    "*.gif",
+    "*.bmp", "*.dib",
+    "*.webp",
+    "*.tif", "*.tiff",
+    "*.avif",
+    "*.heic", "*.heif",
+    "*.svg", "*.svgz",
+    # RAW 形式
+    "*.raw", "*.cr2", "*.cr3", "*.nef", "*.nrw",
+    "*.arw", "*.srf", "*.sr2",
+    "*.orf", "*.rw2", "*.dng",
+    "*.pef", "*.ptx", "*.raf",
 ]
 
 # -------------------------------------------------------------
@@ -56,17 +69,6 @@ junk_patterns = [
     "*.url",
     "*.lnk",
     "*.webloc",
-
-    # よくあるサムネイル・カバー画像名
-    # ※ 実際のコンテンツ画像と区別するため具体的なファイル名で指定
-    "folder.jpg",
-    "folder.jpeg",
-    "folder.png",
-    "Folder.jpg",
-    "Folder.jpeg",
-    "Folder.png",
-    "AlbumArt*.jpg",
-    "AlbumArt*.png",
 
     # 電子書籍・漫画ビューア系のメタデータ
     "ComicInfo.xml",
