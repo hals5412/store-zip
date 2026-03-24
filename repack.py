@@ -567,6 +567,28 @@ def is_already_store_zip(archive_path: Path) -> bool:
 
 
 # ============================================================
+# 重複しない出力パスの生成
+# ============================================================
+def _unique_path(path: Path) -> Path:
+    """
+    path が存在しなければそのまま返す。
+    存在する場合は "stem (1).ext", "stem (2).ext" ... と連番を付けて
+    存在しないパスを返す。既存ファイルは一切変更しない。
+    """
+    if not path.exists():
+        return path
+    parent = path.parent
+    stem   = path.stem
+    suffix = path.suffix
+    counter = 1
+    while True:
+        candidate = parent / f"{stem} ({counter}){suffix}"
+        if not candidate.exists():
+            return candidate
+        counter += 1
+
+
+# ============================================================
 # ルートフォルダ剥がし
 # ============================================================
 def strip_root_folder(extract_dir: Path) -> Path:
@@ -718,13 +740,10 @@ def process_file(
         log(f"  ゴミ箱へ送信: {archive_path.name}")
         send_to_recycle_bin(archive_path)
 
-        # ── 出力先パスを決定 ─────────────────────────────────
-        output_path = archive_path.with_suffix(".zip")
-
-        if output_path.exists():
-            backup = output_path.with_suffix(".zip.bak")
-            output_path.rename(backup)
-            log(f"  既存ファイルを退避: {backup.name}")
+        # ── 出力先パスを決定（同名ファイルがあれば連番で回避）────
+        output_path = _unique_path(archive_path.with_suffix(".zip"))
+        if output_path != archive_path.with_suffix(".zip"):
+            log(f"  同名ファイルが存在するため変更: {output_path.name}")
 
         # ── 一時ZIP を最終パスへ移動 ─────────────────────────
         shutil.move(str(tmp_zip), str(output_path))
