@@ -515,6 +515,50 @@ def extract_with_7zip(sevenzip: str, archive: Path, dest_dir: Path) -> bool:
 
 
 # ============================================================
+# ZIP/CBZ を Python の zipfile で直接展開
+# ============================================================
+def extract_zip_python(archive: Path, dest_dir: Path) -> bool:
+    """
+    Python の zipfile モジュールで ZIP/CBZ を展開する。
+
+    7-Zip を使わないため、UNC パスや角括弧を含むパスでも正常に動作する。
+    EFS フラグなしの旧日本語 ZIP は CP932 でファイル名を再デコードする。
+    """
+    log(f"  展開中: {archive.name}")
+    try:
+        with zipfile.ZipFile(str(archive), "r") as zf:
+            for info in zf.infolist():
+                fname = info.filename
+
+                # EFS フラグ (bit 11) がない場合、ファイル名は CP437 バイト列として
+                # 格納されている。日本語 ZIP は CP932 が多いので再デコードを試みる。
+                if not (info.flag_bits & 0x800):
+                    try:
+                        fname = fname.encode("cp437").decode("cp932")
+                    except (UnicodeEncodeError, UnicodeDecodeError):
+                        pass  # デコード失敗時はそのまま使用
+
+                # パストラバーサル対策
+                target = (dest_dir / fname).resolve()
+                try:
+                    target.relative_to(dest_dir.resolve())
+                except ValueError:
+                    log(f"  スキップ（不正パス）: {fname}")
+                    continue
+
+                if info.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(info) as src, open(target, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+        return True
+    except Exception as e:
+        log_error(f"ZIP 展開失敗: {e}")
+        return False
+
+
+# ============================================================
 # ゴミ除去
 # ============================================================
 def remove_junk_from_dir(extract_dir: Path, config: dict, exe_dir: Path) -> int:
@@ -755,7 +799,13 @@ def process_file(
         extract_dir.mkdir()
 
         # ── 展開 ──────────────────────────────────────────────
-        if not extract_with_7zip(sevenzip, archive_path, extract_dir):
+        # ZIP/CBZ は Python の zipfile で直接展開する。
+        # UNC パスや角括弧を含むパスでも 7-Zip のワイルドカード問題が起きないため。
+        if archive_path.suffix.lower() in _ZIP_LIKE_EXTENSIONS:
+            ok = extract_zip_python(archive_path, extract_dir)
+        else:
+            ok = extract_with_7zip(sevenzip, archive_path, extract_dir)
+        if not ok:
             return "error"
 
         # ── ゴミ除去 ──────────────────────────────────────────
