@@ -568,11 +568,6 @@ def extract_zip_python(archive: Path, dest_dir: Path) -> bool:
         return False
 
 
-def _has_wildcard_chars(path: Path) -> bool:
-    """7-Zip がワイルドカードとして解釈する文字 [ ] がパスに含まれるか確認する。"""
-    s = str(path)
-    return "[" in s or "]" in s
-
 
 def _extract_via_temp_copy(sevenzip: str, archive: Path, dest_dir: Path) -> bool:
     """
@@ -873,9 +868,10 @@ def process_file(
 
         # ── 展開 ──────────────────────────────────────────────
         # ZIP/CBZ → Python zipfile で直接展開（ワイルドカード問題なし）。
-        #           BadZipFile（実体が RAR 等）の場合は一時コピー経由で再試行
-        #           （フォーマット検出で正しい拡張子を付け、-mcp=932 誤適用を防ぐ）。
-        # RAR/7z 等 → パスに [ ] があればローカル一時コピー経由、なければ直接。
+        #           BadZipFile（実体が RAR 等）の場合は一時コピー経由で再試行。
+        #           一時コピー時にマジックバイトで実フォーマットを検出し
+        #           正しい拡張子でコピーすることで -mcp=932 の誤適用を防ぐ。
+        # RAR/7z 等 → 直接 7-Zip で展開（UNC/角括弧パスも問題なし）。
         ok = False
         if archive_path.suffix.lower() in _ZIP_LIKE_EXTENSIONS:
             try:
@@ -884,10 +880,7 @@ def process_file(
                 log(f"  ZIP 形式ではありません。7-Zip で再試行します...")
                 ok = _extract_via_temp_copy(sevenzip, archive_path, extract_dir)
         else:
-            if _has_wildcard_chars(archive_path):
-                ok = _extract_via_temp_copy(sevenzip, archive_path, extract_dir)
-            else:
-                ok = extract_with_7zip(sevenzip, archive_path, extract_dir)
+            ok = extract_with_7zip(sevenzip, archive_path, extract_dir)
         if not ok:
             return "error"
 
