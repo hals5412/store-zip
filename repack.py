@@ -553,7 +553,17 @@ def _extract_via_temp_copy(sevenzip: str, archive: Path, dest_dir: Path) -> bool
         safe_name = "archive" + archive.suffix
         tmp_archive = Path(tmp_dir) / safe_name
         try:
+            # 診断: コピー前に元ファイルのフォーマットシグネチャを確認
+            with open(str(archive), "rb") as f:
+                header = f.read(8)
+            log(f"  [診断] 元ファイルヘッダー: {header.hex()}"
+                f"  (ZIP=504b0304 / RAR=52617221 / 7z=377abcaf)")
             shutil.copy2(str(archive), str(tmp_archive))
+            # 診断: コピー後のシグネチャが一致するか確認
+            with open(str(tmp_archive), "rb") as f:
+                copy_header = f.read(8)
+            log(f"  [診断] コピー後ヘッダー: {copy_header.hex()}"
+                f"  サイズ={tmp_archive.stat().st_size} / 元={archive.stat().st_size}")
         except Exception as e:
             log_error(f"  一時コピー作成失敗: {e}")
             return False
