@@ -439,8 +439,8 @@ _ZIP_LIKE_EXTENSIONS = frozenset({".zip", ".cbz"})
 def _to_7zip_path(path: Path) -> str:
     """
     7-Zip に渡すパス文字列を返す。
-    UNCパスは拡張形式 (prefix \\\\?\\UNC\\) に変換する。
-    これにより MAX_PATH 制限・日本語パスの Windows API エラーを回避できる。
+    NAS 等の UNC パスは拡張 UNC 形式に変換し、
+    MAX_PATH 制限や日本語パスの Windows API エラーを回避する。
     """
     s = str(path)
     if s.startswith("\\\\") and not s.startswith("\\\\?\\"):
@@ -453,17 +453,17 @@ def extract_with_7zip(sevenzip: str, archive: Path, dest_dir: Path) -> bool:
     7-Zip でアーカイブを展開する。
 
     文字コード対策:
-      -mcp=932   : ZIP のファイル名を Shift-JIS として解釈する（ZIP系のみ）。
-                   RAR/7z 等には適用しない（誤動作の原因になり得るため）。
-      UNCパス    : 展開先（ローカル一時フォルダ）は拡張UNCパス形式で渡す。
-      @listfile  : アーカイブパスをリストファイル経由で渡す。
-                   パス中の [ ] を 7-Zip がワイルドカードと解釈するのを防ぐ。
-                   リストファイル内は通常パス形式（\\?\UNC\ 不可）で記述する。
+      -mcp=932  : ZIP のファイル名を Shift-JIS として解釈する（ZIP系のみ）。
+                  RAR/7z 等には適用しない（誤動作の原因になり得るため）。
+      UNCパス   : 展開先（ローカル一時フォルダ）は拡張UNCパス形式で渡す。
+      @listfile : アーカイブパスをリストファイル経由で渡す。
+                  パス中の [ ] を 7-Zip がワイルドカードと解釈するのを防ぐ。
+                  リストファイル内は通常のUNCパス形式で記述する（拡張形式不可）。
     """
     # パス中の [ ] は 7-Zip のコマンドライン上でワイルドカードとして展開される。
     # リストファイルに書いて @path で渡すと展開が行われない。
-    # リストファイル内では \\?\UNC\ 拡張形式を使うと ERROR_INVALID_NAME になるため、
-    # 元の UNC パス形式（\\server\share\...）のまま書く。
+    # リストファイル内で拡張UNCパス形式を使うと ERROR_INVALID_NAME になるため、
+    # 元の UNC パス形式（サーバー名から始まる形式）のまま書く。
     listfile = None
     try:
         with tempfile.NamedTemporaryFile(
