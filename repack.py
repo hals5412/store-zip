@@ -762,41 +762,54 @@ def apply_timestamp(target: Path, mtime: float) -> None:
 # ゴミ箱送り（Windows）
 # ============================================================
 def send_to_recycle_bin(path: Path) -> bool:
-    # send2trash ライブラリ（推奨）
-    # NAS/SMB パスでは SHFileOperation が WinError 32 を返すことがあるため
-    # 失敗時は PowerShell フォールバックへ進む
-    try:
-        import send2trash
-        send2trash.send2trash(str(path))
-        return True
-    except Exception:
-        pass
+    # NAS/SMB パスでは SMB オポチュニスティックロックや Synology インデクサー等が
+    # ファイルを掴んでいて WinError 32 になることがある。
+    # send2trash → PowerShell → 直接削除 の順に試み、各ステップで最大 2 回リトライする。
 
-    # PowerShell フォールバック
-    # パス内のシングルクォートをエスケープ
-    safe_path = str(path).replace("'", "''")
-    ps_script = (
-        "Add-Type -AssemblyName Microsoft.VisualBasic; "
-        "[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile("
-        f"'{safe_path}', 'OnlyErrorDialogs', 'SendToRecycleBin')"
-    )
-    try:
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps_script],
-            capture_output=True, timeout=30,
-        )
-        if result.returncode == 0:
+    def _try_send2trash() -> bool:
+        try:
+            import send2trash
+            send2trash.send2trash(str(path))
             return True
-    except Exception as e:
-        log(f"  警告: PowerShell ゴミ箱送り失敗 ({e})。直接削除します。")
+        except Exception:
+            return False
 
-    # 最終手段: 直接削除
-    try:
-        path.unlink()
-        return True
-    except Exception as e:
-        log_error(f"元ファイルの削除に失敗しました: {e}")
-        return False
+    def _try_powershell() -> bool:
+        safe_path = str(path).replace("'", "''")
+        ps_script = (
+            "Add-Type -AssemblyName Microsoft.VisualBasic; "
+            "[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile("
+            f"'{safe_path}', 'OnlyErrorDialogs', 'SendToRecycleBin')"
+        )
+        try:
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps_script],
+                capture_output=True, timeout=30,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def _try_unlink() -> bool:
+        try:
+            path.unlink()
+            return True
+        except Exception:
+            return False
+
+    for attempt in range(3):
+        if attempt > 0:
+            time.sleep(2)  # SMB ロック解放を待つ
+        if _try_send2trash():
+            return True
+        if _try_powershell():
+            return True
+        if _try_unlink():
+            return True
+
+    log(f"  警告: 元ファイルを削除できませんでした（NAS の SMB ロックが継続中の可能性）。"
+        f"\n         手動で削除してください: {path.name}")
+    return False
 
 
 # ============================================================
@@ -880,7 +893,8 @@ def process_file(
 
         # ── 元ファイルをゴミ箱へ ─────────────────────────────
         log(f"  ゴミ箱へ送信: {archive_path.name}")
-        send_to_recycle_bin(archive_path)
+        if not send_to_recycle_bin(archive_path):
+            log(f"  ※ 変換は完了しています。元ファイルは手動で削除してください。")
 
         # ── 出力先パスを決定（同名ファイルがあれば設定に従い回避）──
         style = config.get("duplicate_name_style", "counter")
