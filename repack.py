@@ -664,11 +664,14 @@ def is_already_store_zip(archive_path: Path) -> bool:
     if archive_path.suffix.lower() not in {".zip", ".cbz"}:
         return False
     try:
-        with zipfile.ZipFile(archive_path, "r") as zf:
-            infos = zf.infolist()
-            if not infos:
-                return False
-            return all(info.compress_type == zipfile.ZIP_STORED for info in infos)
+        # open() を外側に置いてファイルハンドルを確実に閉じる。
+        # ZipFile(filename) は __init__ で例外が起きると __exit__ が呼ばれないため。
+        with open(str(archive_path), "rb") as fp:
+            with zipfile.ZipFile(fp) as zf:
+                infos = zf.infolist()
+                if not infos:
+                    return False
+                return all(info.compress_type == zipfile.ZIP_STORED for info in infos)
     except Exception:
         return False
 
