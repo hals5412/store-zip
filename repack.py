@@ -526,35 +526,39 @@ def extract_zip_python(archive: Path, dest_dir: Path) -> bool:
     """
     log(f"  展開中: {archive.name}")
     try:
-        with zipfile.ZipFile(str(archive), "r") as zf:
-            for info in zf.infolist():
-                fname = info.filename
+        # ファイルハンドルを外側の with で管理する。
+        # zipfile.ZipFile(filename) は __init__ で BadZipFile を投げると
+        # __exit__ が呼ばれずハンドルが残るため、open() を外側に置いて確実に閉じる。
+        with open(str(archive), "rb") as fp:
+            with zipfile.ZipFile(fp) as zf:
+                for info in zf.infolist():
+                    fname = info.filename
 
-                # EFS フラグ (bit 11) がない場合、ファイル名は CP437 バイト列として
-                # 格納されている。日本語 ZIP は CP932 が多いので再デコードを試みる。
-                if not (info.flag_bits & 0x800):
+                    # EFS フラグ (bit 11) がない場合、ファイル名は CP437 バイト列として
+                    # 格納されている。日本語 ZIP は CP932 が多いので再デコードを試みる。
+                    if not (info.flag_bits & 0x800):
+                        try:
+                            fname = fname.encode("cp437").decode("cp932")
+                        except (UnicodeEncodeError, UnicodeDecodeError):
+                            pass  # デコード失敗時はそのまま使用
+
+                    # パストラバーサル対策
+                    target = (dest_dir / fname).resolve()
                     try:
-                        fname = fname.encode("cp437").decode("cp932")
-                    except (UnicodeEncodeError, UnicodeDecodeError):
-                        pass  # デコード失敗時はそのまま使用
+                        target.relative_to(dest_dir.resolve())
+                    except ValueError:
+                        log(f"  スキップ（不正パス）: {fname}")
+                        continue
 
-                # パストラバーサル対策
-                target = (dest_dir / fname).resolve()
-                try:
-                    target.relative_to(dest_dir.resolve())
-                except ValueError:
-                    log(f"  スキップ（不正パス）: {fname}")
-                    continue
-
-                if info.is_dir():
-                    target.mkdir(parents=True, exist_ok=True)
-                else:
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    with zf.open(info) as src, open(target, "wb") as dst:
-                        shutil.copyfileobj(src, dst)
+                    if info.is_dir():
+                        target.mkdir(parents=True, exist_ok=True)
+                    else:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        with zf.open(info) as src, open(target, "wb") as dst:
+                            shutil.copyfileobj(src, dst)
         return True
     except zipfile.BadZipFile:
-        raise  # 呼び出し元が 7-Zip へのフォールバックを処理する
+        raise  # 呼び出し元が 7-Zip へのフォールバックを処理する（fp は既に閉じ済み）
     except Exception as e:
         log_error(f"ZIP 展開失敗: {e}")
         return False
