@@ -455,24 +455,26 @@ def extract_with_7zip(sevenzip: str, archive: Path, dest_dir: Path) -> bool:
     文字コード対策:
       -mcp=932   : ZIP のファイル名を Shift-JIS として解釈する（ZIP系のみ）。
                    RAR/7z 等には適用しない（誤動作の原因になり得るため）。
-      UNCパス    : 拡張UNCパス形式に変換してパス制限を回避。
+      UNCパス    : 展開先（ローカル一時フォルダ）は拡張UNCパス形式で渡す。
       @listfile  : アーカイブパスをリストファイル経由で渡す。
                    パス中の [ ] を 7-Zip がワイルドカードと解釈するのを防ぐ。
+                   リストファイル内は通常パス形式（\\?\UNC\ 不可）で記述する。
     """
     # パス中の [ ] は 7-Zip のコマンドライン上でワイルドカードとして展開される。
     # リストファイルに書いて @path で渡すと展開が行われない。
-    archive_str = _to_7zip_path(archive)
+    # リストファイル内では \\?\UNC\ 拡張形式を使うと ERROR_INVALID_NAME になるため、
+    # 元の UNC パス形式（\\server\share\...）のまま書く。
     listfile = None
     try:
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".txt", delete=False, encoding="utf-8"
         ) as lf:
-            lf.write(archive_str + "\n")
+            lf.write(str(archive) + "\n")   # 変換なし・元パスをそのまま
             listfile = lf.name
 
         cmd = [
             sevenzip, "x", f"@{listfile}",
-            f"-o{_to_7zip_path(dest_dir)}",
+            f"-o{_to_7zip_path(dest_dir)}",   # 展開先はローカル一時フォルダ（拡張形式OK）
             "-y",    # すべての確認プロンプトに Yes
             "-aoa",  # 既存ファイルを上書き
         ]
