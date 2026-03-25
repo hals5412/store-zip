@@ -751,7 +751,7 @@ def make_store_zip(source_dir: Path, output_zip: Path, original_size: int = 0) -
     size = output_zip.stat().st_size
     if original_size > 0:
         ratio = size / original_size * 100
-        log(f"  無圧縮ZIP生成完了: {output_zip.name}  ({size:,} bytes / {ratio:.1f}%)")
+        log(f"  無圧縮ZIP生成完了: {output_zip.name}  ({size:,} bytes / 元 {original_size:,} bytes / {ratio:.2f}%)")
     else:
         log(f"  無圧縮ZIP生成完了: {output_zip.name}  ({size:,} bytes)")
 
