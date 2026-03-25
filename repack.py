@@ -435,6 +435,29 @@ SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({
 # -mcp=932 が有効な形式（ZIP のファイル名エンコーディング指定）
 _ZIP_LIKE_EXTENSIONS = frozenset({".zip", ".cbz"})
 
+# マジックバイト → 実際のフォーマット拡張子
+_FORMAT_SIGNATURES: list[tuple[bytes, str]] = [
+    (b"\x52\x61\x72\x21\x1a\x07", ".rar"),  # RAR4 / RAR5
+    (b"\x37\x7a\xbc\xaf\x27\x1c", ".7z"),   # 7-Zip
+    (b"\x1f\x8b",                  ".gz"),   # gzip / tar.gz
+    (b"\x42\x5a\x68",             ".bz2"),  # bzip2
+    (b"\xfd\x37\x7a\x58\x5a\x00", ".xz"),   # xz
+    (b"\x50\x4b",                  ".zip"),  # ZIP (PK signature)
+]
+
+
+def _detect_real_ext(archive: Path) -> str:
+    """マジックバイトからファイルの実際の拡張子を返す。読み取り失敗時は元の拡張子。"""
+    try:
+        with open(str(archive), "rb") as f:
+            header = f.read(8)
+        for sig, ext in _FORMAT_SIGNATURES:
+            if header.startswith(sig):
+                return ext
+    except Exception:
+        pass
+    return archive.suffix.lower()
+
 
 def _to_7zip_path(path: Path) -> str:
     """
@@ -548,22 +571,18 @@ def _extract_via_temp_copy(sevenzip: str, archive: Path, dest_dir: Path) -> bool
     アーカイブをローカル一時フォルダにコピーしてから 7-Zip で展開する。
     UNC パスや角括弧を含むパスで 7-Zip が直接アクセスできない場合のフォールバック。
     """
+    # 拡張子が実態と異なる場合（例: RAR を .cbz にリネームしたファイル）に備え、
+    # マジックバイトで実際のフォーマットを判定して正しい拡張子のファイル名にする。
+    # これにより extract_with_7zip が誤って -mcp=932 を付けることを防ぐ。
+    real_ext = _detect_real_ext(archive)
+    if real_ext != archive.suffix.lower():
+        log(f"  実際のフォーマット: {archive.suffix} → {real_ext}")
     log(f"  ローカル一時コピーを経由して展開します...")
     with tempfile.TemporaryDirectory(prefix="repack_tmp_") as tmp_dir:
-        safe_name = "archive" + archive.suffix
+        safe_name = "archive" + real_ext
         tmp_archive = Path(tmp_dir) / safe_name
         try:
-            # 診断: コピー前に元ファイルのフォーマットシグネチャを確認
-            with open(str(archive), "rb") as f:
-                header = f.read(8)
-            log(f"  [診断] 元ファイルヘッダー: {header.hex()}"
-                f"  (ZIP=504b0304 / RAR=52617221 / 7z=377abcaf)")
             shutil.copy2(str(archive), str(tmp_archive))
-            # 診断: コピー後のシグネチャが一致するか確認
-            with open(str(tmp_archive), "rb") as f:
-                copy_header = f.read(8)
-            log(f"  [診断] コピー後ヘッダー: {copy_header.hex()}"
-                f"  サイズ={tmp_archive.stat().st_size} / 元={archive.stat().st_size}")
         except Exception as e:
             log_error(f"  一時コピー作成失敗: {e}")
             return False
