@@ -172,6 +172,8 @@ DEFAULT_CONFIG: dict = {
     # "counter" : archive (1).zip, archive (2).zip ...
     # "date"    : archive_20241225.zip, archive_20241225 (1).zip ...
     "duplicate_name_style": "counter",
+    "preserve_timestamp": True,
+    "remove_empty_dirs": True,
     "write_log": False,
 }
 
@@ -185,8 +187,10 @@ def load_config(exe_dir: Path) -> dict:
         "junk_dirs":           list(DEFAULT_CONFIG["junk_dirs"]),
         "allow_patterns":      list(DEFAULT_CONFIG["allow_patterns"]),
         "unknown_file_action":  DEFAULT_CONFIG["unknown_file_action"],
-        "duplicate_name_style": DEFAULT_CONFIG["duplicate_name_style"],
-        "write_log":            DEFAULT_CONFIG["write_log"],
+        "duplicate_name_style":  DEFAULT_CONFIG["duplicate_name_style"],
+        "preserve_timestamp":    DEFAULT_CONFIG["preserve_timestamp"],
+        "remove_empty_dirs":     DEFAULT_CONFIG["remove_empty_dirs"],
+        "write_log":             DEFAULT_CONFIG["write_log"],
     }
 
     # ── config.toml ────────────────────────────────────────
@@ -840,8 +844,24 @@ def process_file(
         return "error"
 
     if is_already_store_zip(archive_path):
-        log_skip(f"既に無圧縮ZIPです。スキップします。")
-        return "skipped"
+        if archive_path.suffix.lower() == ".zip":
+            log_skip(f"既に無圧縮ZIPです。スキップします。")
+            return "skipped"
+        # 無圧縮ZIPだが拡張子が .zip でない（.cbz 等）→ .zip にコピーしてゴミ箱へ
+        log(f"  既に無圧縮ZIPです。拡張子を .zip に修正します。")
+        original_mtime = archive_path.stat().st_mtime
+        style = config.get("duplicate_name_style", "counter")
+        output_path = _unique_path(archive_path.with_suffix(".zip"), style)
+        if output_path != archive_path.with_suffix(".zip"):
+            log(f"  同名ファイルが存在するため変更: {output_path.name}")
+        shutil.copy2(str(archive_path), str(output_path))
+        if config.get("preserve_timestamp", True):
+            apply_timestamp(output_path, original_mtime)
+        log(f"  ゴミ箱へ送信: {archive_path.name}")
+        if not send_to_recycle_bin(archive_path):
+            log(f"  ※ 元ファイルは手動で削除してください。")
+        log_ok(f"完了: {output_path.name}")
+        return "converted"
 
     # 元ファイルのタイムスタンプを保存
     original_mtime = archive_path.stat().st_mtime
@@ -853,7 +873,8 @@ def process_file(
 
         # ── 展開 ──────────────────────────────────────────────
         # ZIP/CBZ → Python zipfile で直接展開（ワイルドカード問題なし）。
-        #           BadZipFile（実体が RAR 等）の場合は 7-Zip にフォールバック。
+        #           BadZipFile（実体が RAR 等）の場合は一時コピー経由で再試行
+        #           （フォーマット検出で正しい拡張子を付け、-mcp=932 誤適用を防ぐ）。
         # RAR/7z 等 → パスに [ ] があればローカル一時コピー経由、なければ直接。
         ok = False
         if archive_path.suffix.lower() in _ZIP_LIKE_EXTENSIONS:
@@ -861,10 +882,7 @@ def process_file(
                 ok = extract_zip_python(archive_path, extract_dir)
             except zipfile.BadZipFile:
                 log(f"  ZIP 形式ではありません。7-Zip で再試行します...")
-                if _has_wildcard_chars(archive_path):
-                    ok = _extract_via_temp_copy(sevenzip, archive_path, extract_dir)
-                else:
-                    ok = extract_with_7zip(sevenzip, archive_path, extract_dir)
+                ok = _extract_via_temp_copy(sevenzip, archive_path, extract_dir)
         else:
             if _has_wildcard_chars(archive_path):
                 ok = _extract_via_temp_copy(sevenzip, archive_path, extract_dir)
