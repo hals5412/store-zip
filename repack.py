@@ -763,11 +763,13 @@ def apply_timestamp(target: Path, mtime: float) -> None:
 # ============================================================
 def send_to_recycle_bin(path: Path) -> bool:
     # send2trash ライブラリ（推奨）
+    # NAS/SMB パスでは SHFileOperation が WinError 32 を返すことがあるため
+    # 失敗時は PowerShell フォールバックへ進む
     try:
         import send2trash
         send2trash.send2trash(str(path))
         return True
-    except ImportError:
+    except Exception:
         pass
 
     # PowerShell フォールバック
