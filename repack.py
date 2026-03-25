@@ -553,9 +553,34 @@ def extract_zip_python(archive: Path, dest_dir: Path) -> bool:
                     with zf.open(info) as src, open(target, "wb") as dst:
                         shutil.copyfileobj(src, dst)
         return True
+    except zipfile.BadZipFile:
+        raise  # 呼び出し元が 7-Zip へのフォールバックを処理する
     except Exception as e:
         log_error(f"ZIP 展開失敗: {e}")
         return False
+
+
+def _has_wildcard_chars(path: Path) -> bool:
+    """7-Zip がワイルドカードとして解釈する文字 [ ] がパスに含まれるか確認する。"""
+    s = str(path)
+    return "[" in s or "]" in s
+
+
+def _extract_via_temp_copy(sevenzip: str, archive: Path, dest_dir: Path) -> bool:
+    """
+    アーカイブをローカル一時フォルダにコピーしてから 7-Zip で展開する。
+    UNC パスや角括弧を含むパスで 7-Zip が直接アクセスできない場合のフォールバック。
+    """
+    log(f"  ローカル一時コピーを経由して展開します...")
+    with tempfile.TemporaryDirectory(prefix="repack_tmp_") as tmp_dir:
+        safe_name = "archive" + archive.suffix
+        tmp_archive = Path(tmp_dir) / safe_name
+        try:
+            shutil.copy2(str(archive), str(tmp_archive))
+        except Exception as e:
+            log_error(f"  一時コピー作成失敗: {e}")
+            return False
+        return extract_with_7zip(sevenzip, tmp_archive, dest_dir)
 
 
 # ============================================================
@@ -799,12 +824,24 @@ def process_file(
         extract_dir.mkdir()
 
         # ── 展開 ──────────────────────────────────────────────
-        # ZIP/CBZ は Python の zipfile で直接展開する。
-        # UNC パスや角括弧を含むパスでも 7-Zip のワイルドカード問題が起きないため。
+        # ZIP/CBZ → Python zipfile で直接展開（ワイルドカード問題なし）。
+        #           BadZipFile（実体が RAR 等）の場合は 7-Zip にフォールバック。
+        # RAR/7z 等 → パスに [ ] があればローカル一時コピー経由、なければ直接。
+        ok = False
         if archive_path.suffix.lower() in _ZIP_LIKE_EXTENSIONS:
-            ok = extract_zip_python(archive_path, extract_dir)
+            try:
+                ok = extract_zip_python(archive_path, extract_dir)
+            except zipfile.BadZipFile:
+                log(f"  ZIP 形式ではありません。7-Zip で再試行します...")
+                if _has_wildcard_chars(archive_path):
+                    ok = _extract_via_temp_copy(sevenzip, archive_path, extract_dir)
+                else:
+                    ok = extract_with_7zip(sevenzip, archive_path, extract_dir)
         else:
-            ok = extract_with_7zip(sevenzip, archive_path, extract_dir)
+            if _has_wildcard_chars(archive_path):
+                ok = _extract_via_temp_copy(sevenzip, archive_path, extract_dir)
+            else:
+                ok = extract_with_7zip(sevenzip, archive_path, extract_dir)
         if not ok:
             return "error"
 
