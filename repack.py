@@ -175,6 +175,8 @@ DEFAULT_CONFIG: dict = {
     "preserve_timestamp": True,
     "remove_empty_dirs": True,
     "write_log": False,
+    # 0 = 制限なし
+    "file_list_limit": 0,
 }
 
 
@@ -191,6 +193,7 @@ def load_config(exe_dir: Path) -> dict:
         "preserve_timestamp":    DEFAULT_CONFIG["preserve_timestamp"],
         "remove_empty_dirs":     DEFAULT_CONFIG["remove_empty_dirs"],
         "write_log":             DEFAULT_CONFIG["write_log"],
+        "file_list_limit":       DEFAULT_CONFIG["file_list_limit"],
     }
 
     # ── config.toml ────────────────────────────────────────
@@ -202,7 +205,8 @@ def load_config(exe_dir: Path) -> dict:
             for k in ("junk_patterns", "junk_dirs", "allow_patterns"):
                 if k in cfg:
                     config[k] = list(cfg[k])
-            for k in ("unknown_file_action", "duplicate_name_style", "write_log"):
+            for k in ("unknown_file_action", "duplicate_name_style", "write_log",
+                      "preserve_timestamp", "remove_empty_dirs", "file_list_limit"):
                 if k in cfg:
                     config[k] = cfg[k]
             log(f"設定読み込み完了: {config_path}")
@@ -999,9 +1003,13 @@ def main() -> None:
     print()
 
     # 処理対象ファイル一覧を表示
+    limit = config.get("file_list_limit", 0)
     print(f"処理対象: {len(args)} ファイル")
-    for i, arg in enumerate(args, 1):
+    show_args = args if limit <= 0 else args[:limit]
+    for i, arg in enumerate(show_args, 1):
         print(f"  [{i:>3}] {Path(arg).name}")
+    if limit > 0 and len(args) > limit:
+        print(f"         ... 他 {len(args) - limit} ファイル")
     print()
 
     # ファイルを並列処理
