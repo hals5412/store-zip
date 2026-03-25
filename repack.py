@@ -992,6 +992,12 @@ def main() -> None:
     log(f"7-Zip: {sevenzip}")
     print()
 
+    # 処理対象ファイル一覧を表示
+    print(f"処理対象: {len(args)} ファイル")
+    for i, arg in enumerate(args, 1):
+        print(f"  [{i:>3}] {Path(arg).name}")
+    print()
+
     # ファイルを並列処理
     # I/Oバウンドな処理なのでスレッドで十分。
     # ワーカー数はファイル数と上限(4)の小さい方。
