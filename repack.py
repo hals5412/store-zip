@@ -732,7 +732,7 @@ def strip_root_folder(extract_dir: Path) -> Path:
 # ============================================================
 # 無圧縮 ZIP 作成
 # ============================================================
-def make_store_zip(source_dir: Path, output_zip: Path) -> None:
+def make_store_zip(source_dir: Path, output_zip: Path, original_size: int = 0) -> None:
     """source_dir 以下のファイルを STORE（無圧縮）ZIP に格納する。"""
     with zipfile.ZipFile(
         output_zip, "w",
@@ -745,7 +745,11 @@ def make_store_zip(source_dir: Path, output_zip: Path) -> None:
                 zf.write(fpath, arcname)
 
     size = output_zip.stat().st_size
-    log(f"  無圧縮ZIP生成完了: {output_zip.name}  ({size:,} bytes)")
+    if original_size > 0:
+        ratio = size / original_size * 100
+        log(f"  無圧縮ZIP生成完了: {output_zip.name}  ({size:,} bytes / {ratio:.1f}%)")
+    else:
+        log(f"  無圧縮ZIP生成完了: {output_zip.name}  ({size:,} bytes)")
 
 
 # ============================================================
@@ -858,8 +862,10 @@ def process_file(
         log_ok(f"完了: {output_path.name}")
         return "converted"
 
-    # 元ファイルのタイムスタンプを保存
-    original_mtime = archive_path.stat().st_mtime
+    # 元ファイルのタイムスタンプ・サイズを保存
+    stat = archive_path.stat()
+    original_mtime = stat.st_mtime
+    original_size  = stat.st_size
 
     with tempfile.TemporaryDirectory(prefix="repack_") as tmp_root:
         tmp_path = Path(tmp_root)
@@ -900,7 +906,7 @@ def process_file(
 
         # ── 無圧縮ZIP生成（一時ファイル）─────────────────────
         tmp_zip = tmp_path / (archive_path.stem + ".zip")
-        make_store_zip(actual_root, tmp_zip)
+        make_store_zip(actual_root, tmp_zip, original_size)
 
         # ── 元ファイルをゴミ箱へ ─────────────────────────────
         log(f"  ゴミ箱へ送信: {archive_path.name}")
