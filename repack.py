@@ -452,66 +452,43 @@ def extract_with_7zip(sevenzip: str, archive: Path, dest_dir: Path) -> bool:
     """
     7-Zip でアーカイブを展開する。
 
-    文字コード対策:
-      -mcp=932  : ZIP のファイル名を Shift-JIS として解釈する（ZIP系のみ）。
-                  RAR/7z 等には適用しない（誤動作の原因になり得るため）。
-      UNCパス   : 展開先（ローカル一時フォルダ）は拡張UNCパス形式で渡す。
-      @listfile : アーカイブパスをリストファイル経由で渡す。
-                  パス中の [ ] を 7-Zip がワイルドカードと解釈するのを防ぐ。
-                  リストファイル内は通常のUNCパス形式で記述する（拡張形式不可）。
+    この関数を呼ぶ前にパスの [ ] チェックを行い、必要なら
+    _extract_via_temp_copy 経由でブラケットのないローカルパスに変換しておくこと。
+    -mcp=932 は ZIP 系のみ適用（RAR/7z 等での誤動作防止）。
     """
-    # パス中の [ ] は 7-Zip のコマンドライン上でワイルドカードとして展開される。
-    # リストファイルに書いて @path で渡すと展開が行われない。
-    # リストファイル内で拡張UNCパス形式を使うと ERROR_INVALID_NAME になるため、
-    # 元の UNC パス形式（サーバー名から始まる形式）のまま書く。
-    listfile = None
+    cmd = [
+        sevenzip, "x", _to_7zip_path(archive),
+        f"-o{_to_7zip_path(dest_dir)}",
+        "-y",    # すべての確認プロンプトに Yes
+        "-aoa",  # 既存ファイルを上書き
+    ]
+    # -mcp=932 は ZIP 系のみ（EFSビットなし旧日本語ZIPのファイル名文字化け対策）
+    if archive.suffix.lower() in _ZIP_LIKE_EXTENSIONS:
+        cmd.append("-mcp=932")
+
+    log(f"  展開中: {archive.name}")
+
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".txt", delete=False, encoding="utf-8"
-        ) as lf:
-            lf.write(str(archive) + "\n")   # 変換なし・元パスをそのまま
-            listfile = lf.name
+        result = subprocess.run(cmd, capture_output=True)
+    except FileNotFoundError:
+        log_error(f"7-Zip 実行ファイルが見つかりません: {sevenzip}")
+        return False
+    except Exception as e:
+        log_error(f"7-Zip の起動に失敗しました: {e}")
+        return False
 
-        cmd = [
-            sevenzip, "x", f"@{listfile}",
-            f"-o{_to_7zip_path(dest_dir)}",   # 展開先はローカル一時フォルダ（拡張形式OK）
-            "-y",    # すべての確認プロンプトに Yes
-            "-aoa",  # 既存ファイルを上書き
-        ]
-        # -mcp=932 は ZIP 系のみ（EFSビットなし旧日本語ZIPのファイル名文字化け対策）
-        if archive.suffix.lower() in _ZIP_LIKE_EXTENSIONS:
-            cmd.append("-mcp=932")
+    stdout_str = decode_bytes(result.stdout) if result.stdout else ""
+    stderr_str = decode_bytes(result.stderr) if result.stderr else ""
 
-        log(f"  展開中: {archive.name}")
+    if result.returncode != 0:
+        log_error(f"7-Zip 展開失敗 (終了コード={result.returncode})")
+        if stderr_str.strip():
+            log_error(f"  stderr: {stderr_str.strip()[:600]}")
+        if stdout_str.strip():
+            log(f"  stdout (末尾300文字): {stdout_str.strip()[-300:]}")
+        return False
 
-        try:
-            result = subprocess.run(cmd, capture_output=True)
-        except FileNotFoundError:
-            log_error(f"7-Zip 実行ファイルが見つかりません: {sevenzip}")
-            return False
-        except Exception as e:
-            log_error(f"7-Zip の起動に失敗しました: {e}")
-            return False
-
-        stdout_str = decode_bytes(result.stdout) if result.stdout else ""
-        stderr_str = decode_bytes(result.stderr) if result.stderr else ""
-
-        if result.returncode != 0:
-            log_error(f"7-Zip 展開失敗 (終了コード={result.returncode})")
-            if stderr_str.strip():
-                log_error(f"  stderr: {stderr_str.strip()[:600]}")
-            if stdout_str.strip():
-                # 末尾だけ表示（大量出力の中でエラー行は末尾に出ることが多い）
-                log(f"  stdout (末尾300文字): {stdout_str.strip()[-300:]}")
-            return False
-
-        return True
-    finally:
-        if listfile:
-            try:
-                os.unlink(listfile)
-            except Exception:
-                pass
+    return True
 
 
 # ============================================================
