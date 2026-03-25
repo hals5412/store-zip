@@ -974,7 +974,7 @@ def main() -> None:
     print("=" * 60)
     print()
 
-    args = sys.argv[1:]
+    args = sorted(sys.argv[1:], key=lambda p: Path(p).name.lower())
     if not args:
         print("使い方:")
         print("  repack.exe <圧縮ファイル> [<圧縮ファイル2> ...]")
