@@ -125,7 +125,7 @@ file_list_limit = 0
 
 ```toml
 # 保持を強制するパターン（junk_patterns より優先）
-# 画像ファイルはデフォルトですべて登録済み
+# 画像ファイルはデフォルトで登録済み
 allow_patterns = [
     "*.jpg", "*.jpeg", "*.png", "*.gif", ...
 ]
