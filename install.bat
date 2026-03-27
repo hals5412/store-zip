@@ -1,6 +1,6 @@
 @echo off
 echo ============================================================
-echo  repack - install / update
+echo  store-zip - install / update
 echo ============================================================
 echo.
 
@@ -28,7 +28,7 @@ echo [2/4] Packages OK
 
 :: [3/4] Build exe
 echo [3/4] Building exe...
-python -m PyInstaller --onefile --console --name repack --hidden-import=tomli --hidden-import=send2trash --noconfirm repack.py
+python -m PyInstaller --onefile --console --name store-zip --hidden-import=tomli --hidden-import=send2trash --noconfirm store-zip.py
 if errorlevel 1 (
     echo [ERROR] Build failed.
     pause
@@ -45,9 +45,9 @@ echo [3/4] Build OK
 
 :: [4/4] Register to SendTo
 echo [4/4] Registering to SendTo...
-set "EXE_PATH=%~dp0dist\repack.exe"
-set "LNK_PATH=%APPDATA%\Microsoft\Windows\SendTo\repack.lnk"
-powershell -NoProfile -Command "$ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut('%LNK_PATH%'); $sc.TargetPath = '%EXE_PATH%'; $sc.WorkingDirectory = '%~dp0dist'; $sc.Description = 'Repack to store ZIP'; $sc.Save()"
+set "EXE_PATH=%~dp0dist\store-zip.exe"
+set "LNK_PATH=%APPDATA%\Microsoft\Windows\SendTo\store-zip.lnk"
+powershell -NoProfile -Command "$ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut('%LNK_PATH%'); $sc.TargetPath = '%EXE_PATH%'; $sc.WorkingDirectory = '%~dp0dist'; $sc.Description = 'Convert to store ZIP'; $sc.Save()"
 if errorlevel 1 (
     echo [ERROR] Failed to register SendTo shortcut.
     pause
@@ -57,7 +57,7 @@ echo [4/4] SendTo OK
 
 echo.
 echo ============================================================
-echo  Done! Right-click a file - Send to - repack
+echo  Done! Right-click a file - Send to - store-zip
 echo ============================================================
 echo.
 pause

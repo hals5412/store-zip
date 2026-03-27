@@ -1,5 +1,5 @@
 """
-repack.py v2.0 - 圧縮ファイルを無圧縮ZIPに変換するツール
+store-zip.py v2.0 - 圧縮ファイルを無圧縮ZIPに変換するツール
 
 主な機能:
   - ZIP / RAR / 7z / tar.gz / CBZ / CBR など主要形式 → 無圧縮ZIP
@@ -65,8 +65,8 @@ class _TeeWriter:
 
 
 def setup_log_file(exe_dir: Path) -> None:
-    """write_log=true のとき呼び出す。repack.log への Tee を設定する。"""
-    log_path = exe_dir / "repack.log"
+    """write_log=true のとき呼び出す。store-zip.log への Tee を設定する。"""
+    log_path = exe_dir / "store-zip.log"
     try:
         lf = open(log_path, "a", encoding="utf-8")
         lf.write(f"\n{'='*60}\n")
@@ -585,7 +585,7 @@ def _extract_via_temp_copy(sevenzip: str, archive: Path, dest_dir: Path) -> bool
     if real_ext != archive.suffix.lower():
         log(f"  実際のフォーマット: {archive.suffix} → {real_ext}")
     log(f"  ローカル一時コピーを経由して展開します...")
-    with tempfile.TemporaryDirectory(prefix="repack_tmp_") as tmp_dir:
+    with tempfile.TemporaryDirectory(prefix="store_zip_tmp_") as tmp_dir:
         safe_name = "archive" + real_ext
         tmp_archive = Path(tmp_dir) / safe_name
         try:
@@ -871,7 +871,7 @@ def process_file(
     original_mtime = stat.st_mtime
     original_size  = stat.st_size
 
-    with tempfile.TemporaryDirectory(prefix="repack_") as tmp_root:
+    with tempfile.TemporaryDirectory(prefix="store_zip_") as tmp_root:
         tmp_path = Path(tmp_root)
         extract_dir = tmp_path / "extracted"
         extract_dir.mkdir()
@@ -970,17 +970,17 @@ def main() -> None:
         exe_dir = Path(__file__).parent
 
     print("=" * 60)
-    print("  repack v2.0 - 無圧縮ZIP変換ツール")
+    print("  store-zip v2.0 - 無圧縮ZIP変換ツール")
     print("=" * 60)
     print()
 
     args = sorted(sys.argv[1:], key=lambda p: Path(p).name.lower())
     if not args:
         print("使い方:")
-        print("  repack.exe <圧縮ファイル> [<圧縮ファイル2> ...]")
+        print("  store-zip.exe <圧縮ファイル> [<圧縮ファイル2> ...]")
         print()
         print("  install_sendto.bat を実行すると SendTo に登録できます。")
-        print("  エクスプローラーで圧縮ファイルを右クリック → 送る → repack")
+        print("  エクスプローラーで圧縮ファイルを右クリック → 送る → store-zip")
         print()
         input("Enter キーで終了...")
         sys.exit(0)
@@ -996,7 +996,7 @@ def main() -> None:
     if not sevenzip:
         log_error("7-Zip (7z.exe) が見つかりません。")
         log_error("  https://www.7-zip.org/ からインストールするか、")
-        log_error("  7z.exe を repack.exe と同じフォルダに置いてください。")
+        log_error("  7z.exe を store-zip.exe と同じフォルダに置いてください。")
         input("Enter キーで終了...")
         sys.exit(1)
     log(f"7-Zip: {sevenzip}")

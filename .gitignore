@@ -10,3 +10,8 @@ __pycache__/
 # 自動生成ファイル（ユーザー環境依存）
 decisions.json
 repack.log
+store-zip.log
+
+# リリースパッケージ
+release-package/
+*.zip
