@@ -177,6 +177,11 @@ DEFAULT_CONFIG: dict = {
     "write_log": False,
     # 0 = 制限なし
     "file_list_limit": 0,
+    # "zip" : 無圧縮 ZIP（デフォルト）
+    # "rar" : 無圧縮 RAR + リカバリーレコード（WinRAR の rar.exe が必要）
+    "output_format": "zip",
+    # リカバリーレコードの割合（%）。output_format = "rar" のときのみ有効。
+    "rar_recovery_record": 5,
 }
 
 
@@ -194,6 +199,8 @@ def load_config(exe_dir: Path) -> dict:
         "remove_empty_dirs":     DEFAULT_CONFIG["remove_empty_dirs"],
         "write_log":             DEFAULT_CONFIG["write_log"],
         "file_list_limit":       DEFAULT_CONFIG["file_list_limit"],
+        "output_format":         DEFAULT_CONFIG["output_format"],
+        "rar_recovery_record":   DEFAULT_CONFIG["rar_recovery_record"],
     }
 
     # ── config.toml ────────────────────────────────────────
@@ -206,7 +213,8 @@ def load_config(exe_dir: Path) -> dict:
                 if k in cfg:
                     config[k] = list(cfg[k])
             for k in ("unknown_file_action", "duplicate_name_style", "write_log",
-                      "preserve_timestamp", "remove_empty_dirs", "file_list_limit"):
+                      "preserve_timestamp", "remove_empty_dirs", "file_list_limit",
+                      "output_format", "rar_recovery_record"):
                 if k in cfg:
                     config[k] = cfg[k]
             log(f"設定読み込み完了: {config_path}")
@@ -412,6 +420,24 @@ def find_7zip(exe_dir: Path) -> str | None:
             return candidate
     # PATH
     return shutil.which("7z")
+
+
+# ============================================================
+# WinRAR (rar.exe) の検出
+# ============================================================
+_WINRAR_CANDIDATES = [
+    r"C:\Program Files\WinRAR\rar.exe",
+    r"C:\Program Files (x86)\WinRAR\rar.exe",
+]
+
+def find_rar(exe_dir: Path) -> str | None:
+    local = exe_dir / "rar.exe"
+    if local.exists():
+        return str(local)
+    for candidate in _WINRAR_CANDIDATES:
+        if Path(candidate).exists():
+            return candidate
+    return shutil.which("rar")
 
 
 # ============================================================
@@ -757,6 +783,53 @@ def make_store_zip(source_dir: Path, output_zip: Path, original_size: int = 0) -
 
 
 # ============================================================
+# 無圧縮 RAR 作成（WinRAR の rar.exe を使用）
+# ============================================================
+def make_store_rar(
+    rar_exe: str,
+    source_dir: Path,
+    output_rar: Path,
+    recovery_record: int,
+    original_size: int = 0,
+) -> bool:
+    """source_dir 以下のファイルを無圧縮 RAR に格納する。"""
+    cmd = [
+        rar_exe, "a",
+        "-m0",                       # 無圧縮（Store）
+        f"-rr{recovery_record}",     # リカバリーレコード
+        "-ep1",                      # ベースディレクトリをパスから除外
+        "-r",                        # サブディレクトリを再帰処理
+        "-o+",                       # 既存ファイルを上書き
+        str(output_rar),
+        str(source_dir) + "\\",
+    ]
+    log(f"  無圧縮RAR生成中 (リカバリーレコード {recovery_record}%)...")
+    try:
+        result = subprocess.run(cmd, capture_output=True)
+    except FileNotFoundError:
+        log_error(f"WinRAR (rar.exe) が見つかりません: {rar_exe}")
+        return False
+    except Exception as e:
+        log_error(f"RAR 作成失敗: {e}")
+        return False
+
+    if result.returncode not in (0, 1):  # WinRAR は警告時に 1 を返す場合がある
+        stderr_str = decode_bytes(result.stderr) if result.stderr else ""
+        log_error(f"RAR 作成失敗 (終了コード={result.returncode})")
+        if stderr_str.strip():
+            log_error(f"  stderr: {stderr_str.strip()[:300]}")
+        return False
+
+    size = output_rar.stat().st_size
+    if original_size > 0:
+        ratio = size / original_size * 100
+        log(f"  無圧縮RAR生成完了: {output_rar.name}  ({size:,} bytes / 元 {original_size:,} bytes / {ratio:.2f}%)")
+    else:
+        log(f"  無圧縮RAR生成完了: {output_rar.name}  ({size:,} bytes)")
+    return True
+
+
+# ============================================================
 # タイムスタンプ復元
 # ============================================================
 def apply_timestamp(target: Path, mtime: float) -> None:
@@ -827,6 +900,7 @@ def process_file(
     sevenzip: str,
     config: dict,
     exe_dir: Path,
+    rar_exe: str | None = None,
 ) -> str:
     """
     戻り値:
@@ -846,7 +920,7 @@ def process_file(
         log_error(f"ファイルが見つかりません: {archive_path}")
         return "error"
 
-    if is_already_store_zip(archive_path):
+    if config.get("output_format", "zip") == "zip" and is_already_store_zip(archive_path):
         if archive_path.suffix.lower() == ".zip":
             log_skip(f"既に無圧縮ZIPです。スキップします。")
             return "skipped"
@@ -908,9 +982,21 @@ def process_file(
         # ── ルートフォルダ剥がし ──────────────────────────────
         actual_root = strip_root_folder(extract_dir)
 
-        # ── 無圧縮ZIP生成（一時ファイル）─────────────────────
-        tmp_zip = tmp_path / (archive_path.stem + ".zip")
-        make_store_zip(actual_root, tmp_zip, original_size)
+        # ── 出力ファイル生成（一時ファイル）──────────────────
+        output_format = config.get("output_format", "zip")
+        if output_format == "rar":
+            tmp_out = tmp_path / (archive_path.stem + ".rar")
+            if not make_store_rar(
+                rar_exe, actual_root, tmp_out,
+                config.get("rar_recovery_record", 5),
+                original_size,
+            ):
+                return "error"
+            out_suffix = ".rar"
+        else:
+            tmp_out = tmp_path / (archive_path.stem + ".zip")
+            make_store_zip(actual_root, tmp_out, original_size)
+            out_suffix = ".zip"
 
         # ── 元ファイルをゴミ箱へ ─────────────────────────────
         log(f"  ゴミ箱へ送信: {archive_path.name}")
@@ -919,12 +1005,12 @@ def process_file(
 
         # ── 出力先パスを決定（同名ファイルがあれば設定に従い回避）──
         style = config.get("duplicate_name_style", "counter")
-        output_path = _unique_path(archive_path.with_suffix(".zip"), style)
-        if output_path != archive_path.with_suffix(".zip"):
+        output_path = _unique_path(archive_path.with_suffix(out_suffix), style)
+        if output_path != archive_path.with_suffix(out_suffix):
             log(f"  同名ファイルが存在するため変更: {output_path.name}")
 
-        # ── 一時ZIP を最終パスへ移動 ─────────────────────────
-        shutil.move(str(tmp_zip), str(output_path))
+        # ── 一時ファイルを最終パスへ移動 ─────────────────────
+        shutil.move(str(tmp_out), str(output_path))
 
         # ── タイムスタンプ ───────────────────────────────────
         if config.get("preserve_timestamp", True):
@@ -1000,6 +1086,17 @@ def main() -> None:
         input("Enter キーで終了...")
         sys.exit(1)
     log(f"7-Zip: {sevenzip}")
+
+    # WinRAR 検出（output_format = "rar" のときのみ必須）
+    rar_exe = None
+    if config.get("output_format", "zip") == "rar":
+        rar_exe = find_rar(exe_dir)
+        if not rar_exe:
+            log_error("WinRAR (rar.exe) が見つかりません。")
+            log_error("  https://www.rarlab.com/ からインストールしてください。")
+            input("Enter キーで終了...")
+            sys.exit(1)
+        log(f"WinRAR: {rar_exe}")
     print()
 
     # 処理対象ファイル一覧を表示
@@ -1023,7 +1120,7 @@ def main() -> None:
         p = Path(arg)
         _thread_local.buffer = []
         try:
-            status = process_file(p, sevenzip, config, exe_dir)
+            status = process_file(p, sevenzip, config, exe_dir, rar_exe)
         except Exception:
             log_error(f"予期しないエラー\n{traceback.format_exc()}")
             status = "error"
