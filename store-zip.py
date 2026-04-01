@@ -182,6 +182,8 @@ DEFAULT_CONFIG: dict = {
     "output_format": "zip",
     # リカバリーレコードの割合（%）。output_format = "rar" のときのみ有効。
     "rar_recovery_record": 5,
+    # rar.exe のパスを明示指定する場合のみ設定（空文字 = 自動検索）
+    "rar_exe_path": "",
 }
 
 
@@ -201,6 +203,7 @@ def load_config(exe_dir: Path) -> dict:
         "file_list_limit":       DEFAULT_CONFIG["file_list_limit"],
         "output_format":         DEFAULT_CONFIG["output_format"],
         "rar_recovery_record":   DEFAULT_CONFIG["rar_recovery_record"],
+        "rar_exe_path":          DEFAULT_CONFIG["rar_exe_path"],
     }
 
     # ── config.toml ────────────────────────────────────────
@@ -214,7 +217,7 @@ def load_config(exe_dir: Path) -> dict:
                     config[k] = list(cfg[k])
             for k in ("unknown_file_action", "duplicate_name_style", "write_log",
                       "preserve_timestamp", "remove_empty_dirs", "file_list_limit",
-                      "output_format", "rar_recovery_record"):
+                      "output_format", "rar_recovery_record", "rar_exe_path"):
                 if k in cfg:
                     config[k] = cfg[k]
             log(f"設定読み込み完了: {config_path}")
@@ -430,7 +433,14 @@ _WINRAR_CANDIDATES = [
     r"C:\Program Files (x86)\WinRAR\rar.exe",
 ]
 
-def find_rar(exe_dir: Path) -> str | None:
+def find_rar(exe_dir: Path, configured_path: str = "") -> str | None:
+    # config.toml で明示指定されている場合はそちらを優先
+    if configured_path:
+        p = Path(configured_path)
+        if p.exists():
+            return str(p)
+        return None  # 指定されているのに見つからない場合は None を返してエラーにする
+    # 自動検索
     local = exe_dir / "rar.exe"
     if local.exists():
         return str(local)
@@ -1090,10 +1100,11 @@ def main() -> None:
     # WinRAR 検出（output_format = "rar" のときのみ必須）
     rar_exe = None
     if config.get("output_format", "zip") == "rar":
-        rar_exe = find_rar(exe_dir)
+        rar_exe = find_rar(exe_dir, config.get("rar_exe_path", ""))
         if not rar_exe:
             log_error("WinRAR (rar.exe) が見つかりません。")
-            log_error("  https://www.rarlab.com/ からインストールしてください。")
+            log_error("  https://www.rarlab.com/ からインストールするか、")
+            log_error("  config.toml の rar_exe_path にフルパスを指定してください。")
             input("Enter キーで終了...")
             sys.exit(1)
         log(f"WinRAR: {rar_exe}")
