@@ -129,6 +129,11 @@ output_format = "zip"
 
 # リカバリーレコードの割合（%）。output_format = "rar" のときのみ有効。
 rar_recovery_record = 5
+
+# rar.exe のパスを明示指定する場合のみ設定（空文字 = 自動検索）
+# 自動検索順: exe と同じフォルダ → Program Files\WinRAR → PATH
+# 例: rar_exe_path = 'D:\Tools\WinRAR\rar.exe'
+rar_exe_path = ""
 ```
 
 ### 保持・削除パターンの管理
