@@ -668,13 +668,26 @@ def remove_junk_from_dir(extract_dir: Path, config: dict, exe_dir: Path) -> int:
             if decision == "junk":
                 files_to_delete.append(fpath)
 
+    # 拡張子単位でグループ化して削除・ログ出力
+    # { ext: (example_name, count) }
+    ext_groups: dict[str, tuple[str, int]] = {}
     for fpath in files_to_delete:
         try:
             fpath.unlink()
-            log(f"  削除: {fpath.name}")
             removed += 1
+            ext = fpath.suffix.lower() or fpath.name  # 拡張子なしはファイル名そのもの
+            if ext not in ext_groups:
+                ext_groups[ext] = (fpath.name, 1)
+            else:
+                ext_groups[ext] = (ext_groups[ext][0], ext_groups[ext][1] + 1)
         except Exception as e:
             log(f"  警告: ファイル削除失敗 {fpath.name}: {e}")
+
+    for ext, (example, count) in ext_groups.items():
+        if count == 1:
+            log(f"  削除: {example}")
+        else:
+            log(f"  削除: {example} など {count} 件 (*{ext})")
 
     # ── 3. 空ディレクトリを掃除 ──────────────────────────────
     if config.get("remove_empty_dirs", True):
