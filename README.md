@@ -134,6 +134,12 @@ rar_recovery_record = 5
 # 自動検索順: exe と同じフォルダ → Program Files\WinRAR → PATH
 # 例: rar_exe_path = 'D:\Tools\WinRAR\rar.exe'
 rar_exe_path = ""
+
+# 同名・同サイズの出力ファイルが既に存在する場合の動作
+#   true  : 重複とみなし新ファイルを破棄してスキップ（デフォルト）
+#           元ファイルの削除失敗による二重変換を防ぐ
+#   false : duplicate_name_style に従いリネームして保存
+skip_if_same_size = true
 ```
 
 ### 保持・削除パターンの管理
