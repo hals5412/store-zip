@@ -184,6 +184,10 @@ DEFAULT_CONFIG: dict = {
     "rar_recovery_record": 5,
     # rar.exe のパスを明示指定する場合のみ設定（空文字 = 自動検索）
     "rar_exe_path": "",
+    # 同名・同サイズの出力ファイルが既に存在する場合にスキップするか
+    # true  : 既存ファイルと同サイズなら重複とみなし新ファイルを破棄してスキップ
+    # false : 通常の重複回避処理（duplicate_name_style に従いリネーム）
+    "skip_if_same_size": True,
 }
 
 
@@ -204,6 +208,7 @@ def load_config(exe_dir: Path) -> dict:
         "output_format":         DEFAULT_CONFIG["output_format"],
         "rar_recovery_record":   DEFAULT_CONFIG["rar_recovery_record"],
         "rar_exe_path":          DEFAULT_CONFIG["rar_exe_path"],
+        "skip_if_same_size":     DEFAULT_CONFIG["skip_if_same_size"],
     }
 
     # ── config.toml ────────────────────────────────────────
@@ -217,7 +222,8 @@ def load_config(exe_dir: Path) -> dict:
                     config[k] = list(cfg[k])
             for k in ("unknown_file_action", "duplicate_name_style", "write_log",
                       "preserve_timestamp", "remove_empty_dirs", "file_list_limit",
-                      "output_format", "rar_recovery_record", "rar_exe_path"):
+                      "output_format", "rar_recovery_record", "rar_exe_path",
+                      "skip_if_same_size"):
                 if k in cfg:
                     config[k] = cfg[k]
             log(f"設定読み込み完了: {config_path}")
@@ -1027,9 +1033,19 @@ def process_file(
             log(f"  ※ 変換は完了しています。元ファイルは手動で削除してください。")
 
         # ── 出力先パスを決定（同名ファイルがあれば設定に従い回避）──
+        intended_path = archive_path.with_suffix(out_suffix)
+        if (config.get("skip_if_same_size", True)
+                and intended_path.exists()
+                and intended_path.stat().st_size == tmp_out.stat().st_size):
+            tmp_out.unlink()
+            log(f"  同名・同サイズのファイルが既に存在します: {intended_path.name}")
+            log(f"  ※ 前回変換済みの可能性があります。元ファイルの削除に失敗していないか確認してください。")
+            log_ok(f"スキップ（重複）: {intended_path.name}")
+            return "skipped"
+
         style = config.get("duplicate_name_style", "counter")
-        output_path = _unique_path(archive_path.with_suffix(out_suffix), style)
-        if output_path != archive_path.with_suffix(out_suffix):
+        output_path = _unique_path(intended_path, style)
+        if output_path != intended_path:
             log(f"  同名ファイルが存在するため変更: {output_path.name}")
 
         # ── 一時ファイルを最終パスへ移動 ─────────────────────
