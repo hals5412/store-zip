@@ -1049,29 +1049,42 @@ def process_file(
             make_store_zip(actual_root, tmp_out, original_size)
             out_suffix = ".zip"
 
-        # ── 元ファイルをゴミ箱へ ─────────────────────────────
-        log(f"  ゴミ箱へ送信: {archive_path.name}")
-        if not send_to_recycle_bin(archive_path):
-            log(f"  ※ 変換は完了しています。元ファイルは手動で削除してください。")
-
-        # ── 出力先パスを決定（同名ファイルがあれば設定に従い回避）──
         intended_path = archive_path.with_suffix(out_suffix)
-        if (config.get("skip_if_same_size", True)
-                and intended_path.exists()
-                and intended_path.stat().st_size == tmp_out.stat().st_size):
-            tmp_out.unlink()
-            log(f"  同名・同サイズのファイルが既に存在します: {intended_path.name}")
-            log(f"  ※ 前回変換済みの可能性があります。元ファイルの削除に失敗していないか確認してください。")
-            log_ok(f"スキップ（重複）: {intended_path.name}")
-            return "skipped"
 
-        style = config.get("duplicate_name_style", "counter")
-        output_path = _unique_path(intended_path, style)
-        if output_path != intended_path:
-            log(f"  同名ファイルが存在するため変更: {output_path.name}")
+        if intended_path == archive_path:
+            # 入力と出力が同一パス（例: a.zip → a.zip）の場合
+            # 一時ファイルをアーカイブと同じフォルダの中間パスに移動してから
+            # 元ファイルを削除し、中間ファイルを最終名にリネームする。
+            # こうしないとゴミ箱送り中に _unique_path が a(1).zip を返してしまう。
+            intermediate = archive_path.parent / (archive_path.stem + "._tmp" + out_suffix)
+            shutil.move(str(tmp_out), str(intermediate))
+            log(f"  ゴミ箱へ送信: {archive_path.name}")
+            if not send_to_recycle_bin(archive_path):
+                log(f"  ※ 変換は完了しています。元ファイルは手動で削除してください。")
+            shutil.move(str(intermediate), str(intended_path))
+            output_path = intended_path
+        else:
+            # 入力と出力が異なるパスの場合（例: a.rar → a.zip）
+            # 元ファイルを先に削除してから出力先を確定する。
+            log(f"  ゴミ箱へ送信: {archive_path.name}")
+            if not send_to_recycle_bin(archive_path):
+                log(f"  ※ 変換は完了しています。元ファイルは手動で削除してください。")
 
-        # ── 一時ファイルを最終パスへ移動 ─────────────────────
-        shutil.move(str(tmp_out), str(output_path))
+            if (config.get("skip_if_same_size", True)
+                    and intended_path.exists()
+                    and intended_path.stat().st_size == tmp_out.stat().st_size):
+                tmp_out.unlink()
+                log(f"  同名・同サイズのファイルが既に存在します: {intended_path.name}")
+                log(f"  ※ 前回変換済みの可能性があります。元ファイルの削除に失敗していないか確認してください。")
+                log_ok(f"スキップ（重複）: {intended_path.name}")
+                return "skipped"
+
+            style = config.get("duplicate_name_style", "counter")
+            output_path = _unique_path(intended_path, style)
+            if output_path != intended_path:
+                log(f"  同名ファイルが存在するため変更: {output_path.name}")
+
+            shutil.move(str(tmp_out), str(output_path))
 
         # ── タイムスタンプ ───────────────────────────────────
         if config.get("preserve_timestamp", True):
