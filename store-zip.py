@@ -734,6 +734,25 @@ def is_already_store_zip(archive_path: Path) -> bool:
         return False
 
 
+def _store_zip_has_root_files(archive_path: Path) -> bool:
+    """
+    ZIP のルート直下にファイルが存在するか確認する。
+    ルートにフォルダのみ（ファイルなし）の場合は False を返す。
+    """
+    try:
+        with open(str(archive_path), "rb") as fp:
+            with zipfile.ZipFile(fp) as zf:
+                for info in zf.infolist():
+                    if info.is_dir():
+                        continue
+                    name = info.filename.replace("\\", "/")
+                    if "/" not in name:  # ルート直下のファイル
+                        return True
+    except Exception:
+        pass
+    return False
+
+
 # ============================================================
 # 重複しない出力パスの生成
 # ============================================================
@@ -951,8 +970,11 @@ def process_file(
 
     if config.get("output_format", "zip") == "zip" and is_already_store_zip(archive_path):
         if archive_path.suffix.lower() == ".zip":
-            log_skip(f"既に無圧縮ZIPです。スキップします。")
-            return "skipped"
+            if _store_zip_has_root_files(archive_path):
+                log_skip(f"既に無圧縮ZIPです。スキップします。")
+                return "skipped"
+            # ルートにファイルがなくフォルダのみ → ルートフォルダ除去のため処理続行
+            log(f"  既に無圧縮ZIPですが、ルートフォルダを除去して再パックします。")
         # 無圧縮ZIPだが拡張子が .zip でない（.cbz 等）→ .zip にコピーしてゴミ箱へ
         log(f"  既に無圧縮ZIPです。拡張子を .zip に修正します。")
         original_mtime = archive_path.stat().st_mtime
