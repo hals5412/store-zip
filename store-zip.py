@@ -14,6 +14,7 @@ store-zip.py v2.0 - 圧縮ファイルを無圧縮ZIPに変換するツール
 import sys
 import os
 import io
+import re
 import zipfile
 import tempfile
 import shutil
@@ -1142,6 +1143,137 @@ def _allow_sleep() -> None:
             pass
 
 
+# ============================================================
+# 設定メニュー（引数なし起動時）
+# ============================================================
+
+_SETTINGS_DEFS = [
+    # (表示名,                             key,                    type,   choices)
+    ("出力フォーマット",                   "output_format",        "enum", ["zip", "rar"]),
+    ("タイムスタンプ保持",                 "preserve_timestamp",   "bool", None),
+    ("空フォルダを削除",                   "remove_empty_dirs",    "bool", None),
+    ("ログファイル出力",                   "write_log",            "bool", None),
+    ("重複サイズスキップ",                 "skip_if_same_size",    "bool", None),
+    ("未分類ファイルの処理",               "unknown_file_action",  "enum", ["ask", "keep", "junk"]),
+    ("重複ファイルの命名規則",             "duplicate_name_style", "enum", ["counter", "date"]),
+    ("ファイル一覧の表示上限 (0=無制限)",  "file_list_limit",      "int",  None),
+    ("RARリカバリーレコード (%)",          "rar_recovery_record",  "int",  None),
+    ("rar.exe のパス (空=自動検索)",       "rar_exe_path",         "str",  None),
+]
+
+
+def _fmt_val(key: str, value) -> str:
+    """メニュー表示用の値文字列を返す。"""
+    if key == "rar_exe_path":
+        return value if value else "(自動検索)"
+    if isinstance(value, bool):
+        return "有効" if value else "無効"
+    return str(value)
+
+
+def _update_toml_value(content: str, key: str, value) -> str:
+    """TOML テキスト内の `key = ...` を書き換える。キーがなければ末尾に追加。"""
+    if isinstance(value, bool):
+        new_val = "true" if value else "false"
+    elif isinstance(value, int):
+        new_val = str(value)
+    elif isinstance(value, str):
+        new_val = '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    else:
+        return content
+    new_content, n = re.subn(
+        rf'^({re.escape(key)}\s*=\s*).*$',
+        rf'\g<1>{new_val}',
+        content,
+        flags=re.MULTILINE,
+    )
+    if n == 0:
+        new_content = content.rstrip("\n") + f"\n{key} = {new_val}\n"
+    return new_content
+
+
+def _save_config_scalars(config_path: Path, config: dict) -> None:
+    """config.toml のスカラー設定のみ更新して保存する。配列・コメントは保持。"""
+    content = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+    for _, key, _, _ in _SETTINGS_DEFS:
+        content = _update_toml_value(content, key, config.get(key, DEFAULT_CONFIG[key]))
+    config_path.write_text(content, encoding="utf-8")
+
+
+def _settings_menu(exe_dir: Path) -> None:
+    """引数なし起動時の設定変更メニュー。"""
+    config = load_config(exe_dir)
+    config_path = exe_dir / "config.toml"
+    changed = False
+
+    while True:
+        print()
+        print("-" * 60)
+        print("  設定メニュー  (config.toml)")
+        print("-" * 60)
+        print()
+        for i, (label, key, _, _) in enumerate(_SETTINGS_DEFS, 1):
+            val = _fmt_val(key, config.get(key, DEFAULT_CONFIG[key]))
+            print(f"  [{i:>2}] {label:<34} {val}")
+        print()
+        print("  [s] 保存して終了  [q] 保存せず終了")
+        print()
+        choice = input("選択 > ").strip().lower()
+
+        if choice == "q":
+            if changed:
+                print("変更は保存されませんでした。")
+            break
+
+        if choice == "s":
+            _save_config_scalars(config_path, config)
+            print(f"保存しました: {config_path}")
+            break
+
+        try:
+            idx = int(choice) - 1
+            if not (0 <= idx < len(_SETTINGS_DEFS)):
+                raise ValueError
+        except ValueError:
+            print("  無効な入力です。番号か s / q を入力してください。")
+            continue
+
+        label, key, typ, choices = _SETTINGS_DEFS[idx]
+        current = config.get(key, DEFAULT_CONFIG[key])
+
+        if typ == "bool":
+            config[key] = not current
+            changed = True
+            print(f"  {label}: {_fmt_val(key, current)} → {_fmt_val(key, config[key])}")
+
+        elif typ == "enum":
+            opts = " / ".join(f"[{c}]" if c == current else c for c in choices)
+            raw = input(f"  {label} ({opts}): ").strip()
+            if raw in choices:
+                config[key] = raw
+                changed = True
+            elif raw == "":
+                pass  # 変更なし
+            else:
+                print(f"  無効な値です。{choices} のいずれかを入力してください。")
+
+        elif typ == "int":
+            raw = input(f"  {label} (現在: {current}、空欄でキャンセル): ").strip()
+            if raw == "":
+                pass
+            else:
+                try:
+                    config[key] = int(raw)
+                    changed = True
+                except ValueError:
+                    print("  整数を入力してください。")
+
+        elif typ == "str":
+            raw = input(f"  {label} (現在: {current!r}、空欄=自動検索): ").strip()
+            config[key] = raw
+            changed = True
+
+
 def main() -> None:
     # exe のディレクトリを取得（PyInstaller でビルドした場合は sys.executable の親）
     if getattr(sys, "frozen", False):
@@ -1156,13 +1288,10 @@ def main() -> None:
 
     args = sorted(sys.argv[1:], key=lambda p: Path(p).name.lower())
     if not args:
-        print("使い方:")
-        print("  store-zip.exe <圧縮ファイル> [<圧縮ファイル2> ...]")
-        print()
-        print("  install_sendto.bat を実行すると SendTo に登録できます。")
-        print("  エクスプローラーで圧縮ファイルを右クリック → 送る → store-zip")
-        print()
-        input("Enter キーで終了...")
+        print("引数なしで起動しました。")
+        print("SendTo から使う場合: エクスプローラーで圧縮ファイルを右クリック → 送る → store-zip")
+        _settings_menu(exe_dir)
+        input("\nEnter キーで終了...")
         sys.exit(0)
 
     # 設定読み込み
