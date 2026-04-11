@@ -609,6 +609,13 @@ def extract_zip_python(archive: Path, dest_dir: Path) -> bool:
         return True
     except zipfile.BadZipFile:
         raise  # 呼び出し元が 7-Zip へのフォールバックを処理する（fp は既に閉じ済み）
+    except RuntimeError as e:
+        msg = str(e).lower()
+        if "password" in msg or "encrypt" in msg:
+            log_error("パスワード付きアーカイブは処理できません。")
+        else:
+            log_error(f"ZIP 展開失敗: {e}")
+        return False
     except Exception as e:
         log_error(f"ZIP 展開失敗: {e}")
         return False
@@ -679,6 +686,9 @@ def remove_junk_from_dir(extract_dir: Path, config: dict, exe_dir: Path) -> int:
     ext_groups: dict[str, tuple[str, int]] = {}
     for fpath in files_to_delete:
         try:
+            # 読み取り専用ファイルは削除前に書き込み権限を付与する
+            if not os.access(fpath, os.W_OK):
+                os.chmod(fpath, fpath.stat().st_mode | 0o200)
             fpath.unlink()
             removed += 1
             ext = fpath.suffix.lower() or fpath.name  # 拡張子なしはファイル名そのもの
@@ -734,20 +744,26 @@ def is_already_store_zip(archive_path: Path) -> bool:
         return False
 
 
-def _store_zip_has_root_files(archive_path: Path) -> bool:
+def _store_zip_needs_root_strip(archive_path: Path) -> bool:
     """
-    ZIP のルート直下にファイルが存在するか確認する。
-    ルートにフォルダのみ（ファイルなし）の場合は False を返す。
+    ZIP のルート直下に単一フォルダのみ存在し、ファイルが一切ない場合に True を返す。
+    この場合のみルートフォルダ除去のため再パックが必要。
+    ルートに複数フォルダ、またはファイルが存在する場合は False。
     """
     try:
         with open(str(archive_path), "rb") as fp:
             with zipfile.ZipFile(fp) as zf:
+                root_dirs = set()
                 for info in zf.infolist():
-                    if info.is_dir():
-                        continue
                     name = info.filename.replace("\\", "/")
-                    if "/" not in name:  # ルート直下のファイル
-                        return True
+                    parts = name.split("/")
+                    if not info.is_dir() and len(parts) == 1:
+                        return False  # ルート直下にファイルがある
+                    if len(parts) >= 2:
+                        root_dirs.add(parts[0])
+                        if len(root_dirs) > 1:
+                            return False  # ルートフォルダが複数ある
+                return len(root_dirs) == 1
     except Exception:
         pass
     return False
@@ -812,10 +828,13 @@ def strip_root_folder(extract_dir: Path) -> Path:
 # ============================================================
 def make_store_zip(source_dir: Path, output_zip: Path, original_size: int = 0) -> None:
     """source_dir 以下のファイルを STORE（無圧縮）ZIP に格納する。"""
+    # strict_timestamps=False: 1980年以前のタイムスタンプを自動的に 1980-01-01 に切り上げる。
+    # ファイル自体は変更しない（read-only ファイルも安全に処理できる）。
     with zipfile.ZipFile(
         output_zip, "w",
         compression=zipfile.ZIP_STORED,
         allowZip64=True,
+        strict_timestamps=False,
     ) as zf:
         for fpath in sorted(source_dir.rglob("*")):
             if fpath.is_file():
@@ -970,26 +989,27 @@ def process_file(
 
     if config.get("output_format", "zip") == "zip" and is_already_store_zip(archive_path):
         if archive_path.suffix.lower() == ".zip":
-            if _store_zip_has_root_files(archive_path):
+            if not _store_zip_needs_root_strip(archive_path):
                 log_skip(f"既に無圧縮ZIPです。スキップします。")
                 return "skipped"
-            # ルートにファイルがなくフォルダのみ → ルートフォルダ除去のため処理続行
+            # ルートに単一フォルダのみ → ルートフォルダ除去のため処理続行
             log(f"  既に無圧縮ZIPですが、ルートフォルダを除去して再パックします。")
-        # 無圧縮ZIPだが拡張子が .zip でない（.cbz 等）→ .zip にコピーしてゴミ箱へ
-        log(f"  既に無圧縮ZIPです。拡張子を .zip に修正します。")
-        original_mtime = archive_path.stat().st_mtime
-        style = config.get("duplicate_name_style", "counter")
-        output_path = _unique_path(archive_path.with_suffix(".zip"), style)
-        if output_path != archive_path.with_suffix(".zip"):
-            log(f"  同名ファイルが存在するため変更: {output_path.name}")
-        shutil.copy2(str(archive_path), str(output_path))
-        if config.get("preserve_timestamp", True):
-            apply_timestamp(output_path, original_mtime)
-        log(f"  ゴミ箱へ送信: {archive_path.name}")
-        if not send_to_recycle_bin(archive_path):
-            log(f"  ※ 元ファイルは手動で削除してください。")
-        log_ok(f"完了: {output_path.name}")
-        return "converted"
+        else:
+            # 無圧縮ZIPだが拡張子が .zip でない（.cbz 等）→ .zip にコピーしてゴミ箱へ
+            log(f"  既に無圧縮ZIPです。拡張子を .zip に修正します。")
+            original_mtime = archive_path.stat().st_mtime
+            style = config.get("duplicate_name_style", "counter")
+            output_path = _unique_path(archive_path.with_suffix(".zip"), style)
+            if output_path != archive_path.with_suffix(".zip"):
+                log(f"  同名ファイルが存在するため変更: {output_path.name}")
+            shutil.copy2(str(archive_path), str(output_path))
+            if config.get("preserve_timestamp", True):
+                apply_timestamp(output_path, original_mtime)
+            log(f"  ゴミ箱へ送信: {archive_path.name}")
+            if not send_to_recycle_bin(archive_path):
+                log(f"  ※ 元ファイルは手動で削除してください。")
+            log_ok(f"完了: {output_path.name}")
+            return "converted"
 
     # 元ファイルのタイムスタンプ・サイズを保存
     stat = archive_path.stat()
