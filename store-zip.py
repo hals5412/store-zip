@@ -25,6 +25,7 @@ import traceback
 import json
 import threading
 import ctypes
+import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
@@ -191,6 +192,10 @@ DEFAULT_CONFIG: dict = {
     "skip_if_same_size": True,
 }
 
+_VALID_UNKNOWN_FILE_ACTIONS = {"ask", "keep", "junk"}
+_VALID_DUPLICATE_NAME_STYLES = {"counter", "date"}
+_VALID_OUTPUT_FORMATS = {"zip", "rar"}
+
 
 # ============================================================
 # 設定ファイル読み込み（config.toml + decisions.json をマージ）
@@ -255,7 +260,51 @@ def load_config(exe_dir: Path) -> dict:
         except Exception as e:
             log(f"警告: decisions.json の読み込みに失敗 ({e})")
 
-    return config
+    return _normalize_config(config)
+
+
+def _normalize_config(config: dict) -> dict:
+    """設定値を検証し、不正値は安全なデフォルトへ戻す。"""
+    normalized = dict(config)
+
+    if normalized.get("unknown_file_action") not in _VALID_UNKNOWN_FILE_ACTIONS:
+        log("警告: unknown_file_action が不正です。'ask' に戻します。")
+        normalized["unknown_file_action"] = DEFAULT_CONFIG["unknown_file_action"]
+
+    if normalized.get("duplicate_name_style") not in _VALID_DUPLICATE_NAME_STYLES:
+        log("警告: duplicate_name_style が不正です。'counter' に戻します。")
+        normalized["duplicate_name_style"] = DEFAULT_CONFIG["duplicate_name_style"]
+
+    if normalized.get("output_format") not in _VALID_OUTPUT_FORMATS:
+        log("警告: output_format が不正です。'zip' に戻します。")
+        normalized["output_format"] = DEFAULT_CONFIG["output_format"]
+
+    for key in ("preserve_timestamp", "remove_empty_dirs", "write_log", "skip_if_same_size"):
+        normalized[key] = bool(normalized.get(key, DEFAULT_CONFIG[key]))
+
+    try:
+        normalized["file_list_limit"] = max(0, int(normalized.get("file_list_limit", 0)))
+    except (TypeError, ValueError):
+        log("警告: file_list_limit が不正です。0 に戻します。")
+        normalized["file_list_limit"] = DEFAULT_CONFIG["file_list_limit"]
+
+    try:
+        rr = int(normalized.get("rar_recovery_record", DEFAULT_CONFIG["rar_recovery_record"]))
+    except (TypeError, ValueError):
+        log("警告: rar_recovery_record が不正です。5 に戻します。")
+        rr = DEFAULT_CONFIG["rar_recovery_record"]
+    normalized["rar_recovery_record"] = min(100, max(1, rr))
+
+    for key in ("junk_patterns", "junk_dirs", "allow_patterns"):
+        value = normalized.get(key, DEFAULT_CONFIG[key])
+        if isinstance(value, list):
+            normalized[key] = [str(item) for item in value]
+        else:
+            log(f"警告: {key} は配列である必要があります。デフォルトを使用します。")
+            normalized[key] = list(DEFAULT_CONFIG[key])
+
+    normalized["rar_exe_path"] = str(normalized.get("rar_exe_path", ""))
+    return normalized
 
 
 # ============================================================
@@ -577,6 +626,7 @@ def extract_zip_python(archive: Path, dest_dir: Path) -> bool:
     """
     log(f"  展開中: {archive.name}")
     try:
+        dest_root = dest_dir.resolve()
         # ファイルハンドルを外側の with で管理する。
         # zipfile.ZipFile(filename) は __init__ で BadZipFile を投げると
         # __exit__ が呼ばれずハンドルが残るため、open() を外側に置いて確実に閉じる。
@@ -596,7 +646,7 @@ def extract_zip_python(archive: Path, dest_dir: Path) -> bool:
                     # パストラバーサル対策
                     target = (dest_dir / fname).resolve()
                     try:
-                        target.relative_to(dest_dir.resolve())
+                        target.relative_to(dest_root)
                     except ValueError:
                         log(f"  スキップ（不正パス）: {fname}")
                         continue
@@ -837,8 +887,12 @@ def make_store_zip(source_dir: Path, output_zip: Path, original_size: int = 0) -
         allowZip64=True,
         strict_timestamps=False,
     ) as zf:
-        for fpath in sorted(source_dir.rglob("*")):
-            if fpath.is_file():
+        for dirpath, dirnames, filenames in os.walk(source_dir):
+            dirnames.sort()
+            filenames.sort()
+            base_dir = Path(dirpath)
+            for fname in filenames:
+                fpath = base_dir / fname
                 arcname = fpath.relative_to(source_dir)
                 zf.write(fpath, arcname)
 
@@ -912,7 +966,8 @@ def apply_timestamp(target: Path, mtime: float) -> None:
 def send_to_recycle_bin(path: Path) -> bool:
     # NAS/SMB パスでは SMB オポチュニスティックロックや Synology インデクサー等が
     # ファイルを掴んでいて WinError 32 になることがある。
-    # send2trash → PowerShell → 直接削除 の順に試み、各ステップで最大 2 回リトライする。
+    # send2trash → PowerShell の順に試み、各ステップで最大 2 回リトライする。
+    # 失敗時に直接削除へフォールバックすると「ゴミ箱へ送る」という期待を破るため行わない。
 
     def _try_send2trash() -> bool:
         try:
@@ -938,13 +993,6 @@ def send_to_recycle_bin(path: Path) -> bool:
         except Exception:
             return False
 
-    def _try_unlink() -> bool:
-        try:
-            path.unlink()
-            return True
-        except Exception:
-            return False
-
     for attempt in range(3):
         if attempt > 0:
             time.sleep(2)  # SMB ロック解放を待つ
@@ -952,12 +1000,33 @@ def send_to_recycle_bin(path: Path) -> bool:
             return True
         if _try_powershell():
             return True
-        if _try_unlink():
-            return True
 
     log(f"  警告: 元ファイルを削除できませんでした（NAS の SMB ロックが継続中の可能性）。"
         f"\n         手動で削除してください: {path.name}")
     return False
+
+
+def _hash_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    """ファイル全体の SHA-256 を返す。"""
+    digest = hashlib.sha256()
+    with open(path, "rb") as fp:
+        while True:
+            chunk = fp.read(chunk_size)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def files_are_identical(path1: Path, path2: Path) -> bool:
+    """サイズ一致に加え、SHA-256 でも同一性を確認する。"""
+    try:
+        if path1.stat().st_size != path2.stat().st_size:
+            return False
+        return _hash_file(path1) == _hash_file(path2)
+    except Exception as e:
+        log(f"  警告: 重複判定に失敗したため別ファイルとして扱います: {e}")
+        return False
 
 
 # ============================================================
@@ -1046,8 +1115,7 @@ def process_file(
             log(f"  合計 {removed} 件を削除しました")
 
         # ── 空チェック ────────────────────────────────────────
-        remaining_files = [f for f in extract_dir.rglob("*") if f.is_file()]
-        if not remaining_files:
+        if not any(f.is_file() for f in extract_dir.rglob("*")):
             log("  ゴミ除去後にファイルが残りませんでした。元ファイルは変更しません。")
             return "skipped"
 
@@ -1081,9 +1149,13 @@ def process_file(
             shutil.move(str(tmp_out), str(intermediate))
             log(f"  ゴミ箱へ送信: {archive_path.name}")
             if not send_to_recycle_bin(archive_path):
-                log(f"  ※ 変換は完了しています。元ファイルは手動で削除してください。")
-            shutil.move(str(intermediate), str(intended_path))
-            output_path = intended_path
+                style = config.get("duplicate_name_style", "counter")
+                output_path = _unique_path(intended_path, style)
+                log(f"  ※ 元ファイルを保持したまま、変換結果を別名保存します: {output_path.name}")
+                shutil.move(str(intermediate), str(output_path))
+            else:
+                shutil.move(str(intermediate), str(intended_path))
+                output_path = intended_path
         else:
             # 入力と出力が異なるパスの場合（例: a.rar → a.zip）
             # 元ファイルを先に削除してから出力先を確定する。
@@ -1093,9 +1165,9 @@ def process_file(
 
             if (config.get("skip_if_same_size", True)
                     and intended_path.exists()
-                    and intended_path.stat().st_size == tmp_out.stat().st_size):
+                    and files_are_identical(intended_path, tmp_out)):
                 tmp_out.unlink()
-                log(f"  同名・同サイズのファイルが既に存在します: {intended_path.name}")
+                log(f"  同名・同内容のファイルが既に存在します: {intended_path.name}")
                 log(f"  ※ 前回変換済みの可能性があります。元ファイルの削除に失敗していないか確認してください。")
                 log_ok(f"スキップ（重複）: {intended_path.name}")
                 return "skipped"

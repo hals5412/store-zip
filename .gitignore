@@ -1,11 +1,14 @@
 # PyInstaller
 dist/
 build/
+.release-dist/
+.release-build/
 *.spec
 
 # Python cache
 __pycache__/
 *.py[cod]
+.codex-smoke/
 
 # 自動生成ファイル（ユーザー環境依存）
 decisions.json
