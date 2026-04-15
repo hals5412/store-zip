@@ -26,6 +26,7 @@ import json
 import threading
 import ctypes
 import hashlib
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
@@ -95,6 +96,9 @@ except ImportError:
 # これにより並列処理時もファイル単位でログがまとまって表示される。
 # ============================================================
 _thread_local = threading.local()
+_LOG_STATUS_WIDTH = 5
+_LOG_LABEL_WIDTH = 22
+_LOG_LABEL_MAX_WIDTH = 30
 
 
 def _emit(line: str) -> None:
@@ -107,17 +111,52 @@ def _emit(line: str) -> None:
         sys.stdout.flush()
 
 
+def _display_width(text: str) -> int:
+    width = 0
+    for ch in text:
+        width += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    return width
+
+
+def _pad_display(text: str, width: int) -> str:
+    return text + " " * max(0, width - _display_width(text))
+
+
+def _format_structured_message(msg: str) -> str:
+    """`ラベル: 詳細` 形式のログを見やすく桁揃えする。"""
+    if "\n" in msg:
+        return msg
+
+    indent_len = len(msg) - len(msg.lstrip(" "))
+    indent = msg[:indent_len]
+    body = msg[indent_len:]
+    if ":" not in body:
+        return msg
+
+    label, detail = body.split(":", 1)
+    label = label.rstrip()
+    detail = detail.lstrip()
+    if not label or _display_width(label) > _LOG_LABEL_MAX_WIDTH:
+        return msg
+
+    return f"{indent}{_pad_display(label, _LOG_LABEL_WIDTH)} : {detail}"
+
+
+def _format_status_message(status: str, msg: str) -> str:
+    return f"{status:<{_LOG_STATUS_WIDTH}} {_format_structured_message(msg)}"
+
+
 def log(msg: str) -> None:
-    _emit(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n")
+    _emit(f"[{datetime.now().strftime('%H:%M:%S')}] {_format_structured_message(msg)}\n")
 
 def log_error(msg: str) -> None:
-    _emit(f"[{datetime.now().strftime('%H:%M:%S')}] ERROR: {msg}\n")
+    _emit(f"[{datetime.now().strftime('%H:%M:%S')}] {_format_status_message('ERROR', msg)}\n")
 
 def log_ok(msg: str) -> None:
-    _emit(f"[{datetime.now().strftime('%H:%M:%S')}] OK: {msg}\n")
+    _emit(f"[{datetime.now().strftime('%H:%M:%S')}] {_format_status_message('OK', msg)}\n")
 
 def log_skip(msg: str) -> None:
-    _emit(f"[{datetime.now().strftime('%H:%M:%S')}] SKIP: {msg}\n")
+    _emit(f"[{datetime.now().strftime('%H:%M:%S')}] {_format_status_message('SKIP', msg)}\n")
 
 
 def _flush_buffer() -> None:
