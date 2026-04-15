@@ -27,6 +27,7 @@ import threading
 import ctypes
 import hashlib
 import unicodedata
+import difflib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
@@ -99,6 +100,14 @@ _thread_local = threading.local()
 _LOG_STATUS_WIDTH = 5
 _LOG_LABEL_WIDTH = 22
 _LOG_LABEL_MAX_WIDTH = 30
+_SERIES_RANGE_SEP = r"(?:-|−|－|–|〜|~)"
+_SERIES_SUFFIX_PATTERNS = (
+    rf"\s*第\s*(\d+)(?:\s*{_SERIES_RANGE_SEP}\s*(\d+))?\s*巻(?:\s*[\(（][^)\uFF09]*[\)\uFF09])?\s*$",
+    rf"\s*(?:v|vol|volume)\s*(\d+)(?:\s*{_SERIES_RANGE_SEP}\s*(\d+))?\s*$",
+    rf"\s*(\d+)(?:\s*{_SERIES_RANGE_SEP}\s*(\d+))?\s*$",
+)
+_SERIES_SIMILARITY_THRESHOLD = 0.78
+_SERIES_PREFIX_THRESHOLD = 0.70
 
 
 def _emit(line: str) -> None:
@@ -146,6 +155,105 @@ def _format_status_message(status: str, msg: str) -> str:
     status_prefix = f"{status:<{_LOG_STATUS_WIDTH}} "
     label_width = max(1, _LOG_LABEL_WIDTH - _display_width(status_prefix))
     return f"{status_prefix}{_format_structured_message(msg, label_width)}"
+
+
+def _normalize_series_stem(name: str) -> str:
+    stem = unicodedata.normalize("NFKC", Path(name).stem).lower()
+    stem = stem.replace("　", " ")
+    stem = re.sub(r"\s+", " ", stem).strip()
+    return stem
+
+
+def _split_series_name_and_order(name: str) -> tuple[str, tuple[int, int, str]]:
+    """
+    ファイル名からシリーズ名と巻順ヒントを抽出する。
+
+    実ログ上は
+      - 「タイトル 第01巻」
+      - 「タイトル 第02-08巻」
+      - 「Title v09」
+    のような末尾巻数パターンが多いため、それを優先的に扱う。
+    """
+    stem = _normalize_series_stem(name)
+    for pattern in _SERIES_SUFFIX_PATTERNS:
+        m = re.search(pattern, stem)
+        if not m:
+            continue
+        series = stem[:m.start()].rstrip(" _-")
+        if not series:
+            series = stem
+        start = int(m.group(1))
+        end = int(m.group(2) or m.group(1))
+        return series, (start, end, stem)
+    return stem, (10**9, 10**9, stem)
+
+
+def _series_similarity_base(series: str) -> str:
+    base = series
+    base = re.sub(r"\d+", "", base)
+    base = re.sub(r"[\s\-_−－–〜~\[\]\(\)【】「」『』:：,，.．]+", "", base)
+    return base
+
+
+def _common_prefix_ratio(a: str, b: str) -> float:
+    if not a or not b:
+        return 0.0
+    limit = min(len(a), len(b))
+    matched = 0
+    for i in range(limit):
+        if a[i] != b[i]:
+            break
+        matched += 1
+    return matched / max(1, min(len(a), len(b)))
+
+
+def _is_similar_series_name(left: str, right: str) -> bool:
+    if left == right:
+        return True
+
+    left_base = _series_similarity_base(left)
+    right_base = _series_similarity_base(right)
+    if not left_base or not right_base:
+        return False
+
+    ratio = difflib.SequenceMatcher(None, left_base, right_base).ratio()
+    prefix_ratio = _common_prefix_ratio(left_base, right_base)
+    return ratio >= _SERIES_SIMILARITY_THRESHOLD and prefix_ratio >= _SERIES_PREFIX_THRESHOLD
+
+
+def _find_matching_series_key(existing_keys: list[str], candidate: str) -> str | None:
+    for key in existing_keys:
+        if _is_similar_series_name(key, candidate):
+            return key
+    return None
+
+
+def _build_processing_groups(args: list[str], fuzzy_match: bool = False) -> list[list[str]]:
+    """
+    同シリーズと思われるファイル群ごとにグループ化する。
+    グループ内は巻順で処理し、グループ同士は並列実行してよい。
+    """
+    grouped: dict[str, list[tuple[tuple[int, int, str], str]]] = {}
+    ordered_keys: list[str] = []
+    for arg in args:
+        raw_key, order = _split_series_name_and_order(Path(arg).name)
+        if raw_key in grouped:
+            key = raw_key
+        elif fuzzy_match:
+            key = _find_matching_series_key(ordered_keys, raw_key) or raw_key
+        else:
+            key = raw_key
+        if key not in grouped:
+            grouped[key] = []
+            ordered_keys.append(key)
+        grouped[key].append((order, arg))
+
+    groups: list[list[str]] = []
+    for key in ordered_keys:
+        items = grouped[key]
+        items.sort(key=lambda item: item[0])
+        groups.append([arg for _, arg in items])
+    return groups
 
 
 def log(msg: str) -> None:
@@ -231,6 +339,14 @@ DEFAULT_CONFIG: dict = {
     # true  : 既存ファイルと同サイズなら重複とみなし新ファイルを破棄してスキップ
     # false : 通常の重複回避処理（duplicate_name_style に従いリネーム）
     "skip_if_same_size": True,
+    # 既に無圧縮ZIPのファイルも条件に関係なく再処理するか
+    # true  : スキップせず毎回再展開・再パックする
+    # false : 通常どおり必要時のみ処理する（デフォルト）
+    "force_reprocess_store_zip": False,
+    # 類似シリーズ名も同シリーズ候補としてまとめるか
+    # true  : 数字以外の名前がよく似たものも順番処理する
+    # false : 明確に同じシリーズ名のものだけ順番処理する（デフォルト）
+    "fuzzy_group_similar_series": False,
 }
 
 _VALID_UNKNOWN_FILE_ACTIONS = {"ask", "keep", "junk"}
@@ -256,6 +372,8 @@ def load_config(exe_dir: Path) -> dict:
         "rar_recovery_record":   DEFAULT_CONFIG["rar_recovery_record"],
         "rar_exe_path":          DEFAULT_CONFIG["rar_exe_path"],
         "skip_if_same_size":     DEFAULT_CONFIG["skip_if_same_size"],
+        "force_reprocess_store_zip": DEFAULT_CONFIG["force_reprocess_store_zip"],
+        "fuzzy_group_similar_series": DEFAULT_CONFIG["fuzzy_group_similar_series"],
     }
 
     # ── config.toml ────────────────────────────────────────
@@ -270,7 +388,8 @@ def load_config(exe_dir: Path) -> dict:
             for k in ("unknown_file_action", "duplicate_name_style", "write_log",
                       "preserve_timestamp", "remove_empty_dirs", "file_list_limit",
                       "output_format", "rar_recovery_record", "rar_exe_path",
-                      "skip_if_same_size"):
+                      "skip_if_same_size", "force_reprocess_store_zip",
+                      "fuzzy_group_similar_series"):
                 if k in cfg:
                     config[k] = cfg[k]
             log(f"設定読み込み完了: {config_path}")
@@ -320,7 +439,9 @@ def _normalize_config(config: dict) -> dict:
         log("警告: output_format が不正です。'zip' に戻します。")
         normalized["output_format"] = DEFAULT_CONFIG["output_format"]
 
-    for key in ("preserve_timestamp", "remove_empty_dirs", "write_log", "skip_if_same_size"):
+    for key in ("preserve_timestamp", "remove_empty_dirs", "write_log",
+                "skip_if_same_size", "force_reprocess_store_zip",
+                "fuzzy_group_similar_series"):
         normalized[key] = bool(normalized.get(key, DEFAULT_CONFIG[key]))
 
     try:
@@ -1099,7 +1220,9 @@ def process_file(
         return "error"
 
     if config.get("output_format", "zip") == "zip" and is_already_store_zip(archive_path):
-        if archive_path.suffix.lower() == ".zip":
+        if config.get("force_reprocess_store_zip", False):
+            log("  既に無圧縮ZIPですが、設定により再処理します。")
+        elif archive_path.suffix.lower() == ".zip":
             if not _store_zip_needs_root_strip(archive_path):
                 log_skip(f"既に無圧縮ZIPです。スキップします。")
                 return "skipped"
@@ -1263,6 +1386,8 @@ def _allow_sleep() -> None:
 _SETTINGS_DEFS = [
     # (表示名,                             key,                    type,   choices)
     ("出力フォーマット",                   "output_format",        "enum", ["zip", "rar"]),
+    ("無圧縮ZIPを常に再処理",             "force_reprocess_store_zip", "bool", None),
+    ("類似シリーズもまとめる",             "fuzzy_group_similar_series", "bool", None),
     ("タイムスタンプ保持",                 "preserve_timestamp",   "bool", None),
     ("空フォルダを削除",                   "remove_empty_dirs",    "bool", None),
     ("ログファイル出力",                   "write_log",            "bool", None),
@@ -1448,9 +1573,10 @@ def main() -> None:
 
     # ファイルを並列処理
     # I/Oバウンドな処理なのでスレッドで十分。
-    # ワーカー数はファイル数と上限(4)の小さい方。
+    # 同シリーズと思われる連番ファイルは、巻順を保つため同一ワーカーで順番に処理する。
     errors: list[str] = []
-    n_workers = min(4, len(args))
+    groups = _build_processing_groups(args, config.get("fuzzy_group_similar_series", False))
+    n_workers = min(4, len(groups))
 
     def _run(arg: str) -> tuple[str, str]:
         """1ファイルをバッファ付きで処理し (name, status) を返す。"""
@@ -1466,23 +1592,36 @@ def main() -> None:
             _thread_local.buffer = None
         return p.name, status
 
+    def _run_group(group_args: list[str]) -> list[tuple[str, str]]:
+        group_results: list[tuple[str, str]] = []
+        for arg in group_args:
+            group_results.append(_run(arg))
+        return group_results
+
     results: list[tuple[str, str]] = []  # (name, status)
+    serialized_groups = [group for group in groups if len(group) >= 2]
 
     _prevent_sleep()
     try:
-        if n_workers == 1:
+        if len(args) == 1:
             results.append(_run(args[0]))
         else:
             log(f"並列処理開始: {len(args)} ファイル / {n_workers} ワーカー")
+            if serialized_groups:
+                serialized_count = sum(len(group) for group in serialized_groups)
+                log(f"同シリーズ順番処理: {serialized_count} ファイル / {len(serialized_groups)} グループ")
+                if config.get("fuzzy_group_similar_series", False):
+                    log("  類似シリーズ名のまとめ: 有効")
             print()
             with ThreadPoolExecutor(max_workers=n_workers) as executor:
-                futures = {executor.submit(_run, a): a for a in args}
+                futures = {executor.submit(_run_group, group): group for group in groups}
                 for future in as_completed(futures):
                     try:
-                        results.append(future.result())
+                        results.extend(future.result())
                     except Exception:
                         log_error(f"予期しないエラー\n{traceback.format_exc()}")
-                        results.append((Path(futures[future]).name, "error"))
+                        failed_group = futures[future]
+                        results.extend((Path(arg).name, "error") for arg in failed_group)
     finally:
         _allow_sleep()
 
