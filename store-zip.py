@@ -228,7 +228,7 @@ def _find_matching_series_key(existing_keys: list[str], candidate: str) -> str |
     return None
 
 
-def _build_processing_groups(args: list[str], fuzzy_match: bool = False) -> list[list[str]]:
+def _build_processing_groups(args: list[str], grouping_mode: str = "off") -> list[list[str]]:
     """
     同シリーズと思われるファイル群ごとにグループ化する。
     グループ内は巻順で処理し、グループ同士は並列実行してよい。
@@ -237,9 +237,11 @@ def _build_processing_groups(args: list[str], fuzzy_match: bool = False) -> list
     ordered_keys: list[str] = []
     for arg in args:
         raw_key, order = _split_series_name_and_order(Path(arg).name)
-        if raw_key in grouped:
+        if grouping_mode == "off":
+            key = Path(arg).name.lower()
+        elif raw_key in grouped:
             key = raw_key
-        elif fuzzy_match:
+        elif grouping_mode == "fuzzy":
             key = _find_matching_series_key(ordered_keys, raw_key) or raw_key
         else:
             key = raw_key
@@ -343,15 +345,17 @@ DEFAULT_CONFIG: dict = {
     # true  : スキップせず毎回再展開・再パックする
     # false : 通常どおり必要時のみ処理する（デフォルト）
     "force_reprocess_store_zip": False,
-    # 類似シリーズ名も同シリーズ候補としてまとめるか
-    # true  : 数字以外の名前がよく似たものも順番処理する
-    # false : 明確に同じシリーズ名のものだけ順番処理する（デフォルト）
-    "fuzzy_group_similar_series": False,
+    # シリーズ順番処理の強さ
+    # "off"    : まとめ処理しない（デフォルト）
+    # "strict" : 明確に同じシリーズ名のものだけ順番処理
+    # "fuzzy"  : 数字以外の名前がよく似たものも順番処理
+    "series_grouping_mode": "off",
 }
 
 _VALID_UNKNOWN_FILE_ACTIONS = {"ask", "keep", "junk"}
 _VALID_DUPLICATE_NAME_STYLES = {"counter", "date"}
 _VALID_OUTPUT_FORMATS = {"zip", "rar"}
+_VALID_SERIES_GROUPING_MODES = {"off", "strict", "fuzzy"}
 
 
 # ============================================================
@@ -373,7 +377,7 @@ def load_config(exe_dir: Path) -> dict:
         "rar_exe_path":          DEFAULT_CONFIG["rar_exe_path"],
         "skip_if_same_size":     DEFAULT_CONFIG["skip_if_same_size"],
         "force_reprocess_store_zip": DEFAULT_CONFIG["force_reprocess_store_zip"],
-        "fuzzy_group_similar_series": DEFAULT_CONFIG["fuzzy_group_similar_series"],
+        "series_grouping_mode":  DEFAULT_CONFIG["series_grouping_mode"],
     }
 
     # ── config.toml ────────────────────────────────────────
@@ -389,9 +393,11 @@ def load_config(exe_dir: Path) -> dict:
                       "preserve_timestamp", "remove_empty_dirs", "file_list_limit",
                       "output_format", "rar_recovery_record", "rar_exe_path",
                       "skip_if_same_size", "force_reprocess_store_zip",
-                      "fuzzy_group_similar_series"):
+                      "series_grouping_mode"):
                 if k in cfg:
                     config[k] = cfg[k]
+            if "series_grouping_mode" not in cfg and "fuzzy_group_similar_series" in cfg:
+                config["series_grouping_mode"] = "fuzzy" if cfg["fuzzy_group_similar_series"] else "strict"
             log(f"設定読み込み完了: {config_path}")
         except Exception as e:
             log(f"警告: config.toml の読み込みに失敗 ({e})。デフォルト設定を使用します。")
@@ -439,9 +445,12 @@ def _normalize_config(config: dict) -> dict:
         log("警告: output_format が不正です。'zip' に戻します。")
         normalized["output_format"] = DEFAULT_CONFIG["output_format"]
 
+    if normalized.get("series_grouping_mode") not in _VALID_SERIES_GROUPING_MODES:
+        log("警告: series_grouping_mode が不正です。'off' に戻します。")
+        normalized["series_grouping_mode"] = DEFAULT_CONFIG["series_grouping_mode"]
+
     for key in ("preserve_timestamp", "remove_empty_dirs", "write_log",
-                "skip_if_same_size", "force_reprocess_store_zip",
-                "fuzzy_group_similar_series"):
+                "skip_if_same_size", "force_reprocess_store_zip"):
         normalized[key] = bool(normalized.get(key, DEFAULT_CONFIG[key]))
 
     try:
@@ -1387,7 +1396,7 @@ _SETTINGS_DEFS = [
     # (表示名,                             key,                    type,   choices)
     ("出力フォーマット",                   "output_format",        "enum", ["zip", "rar"]),
     ("無圧縮ZIPを常に再処理",             "force_reprocess_store_zip", "bool", None),
-    ("類似シリーズもまとめる",             "fuzzy_group_similar_series", "bool", None),
+    ("シリーズ順番処理",                   "series_grouping_mode", "enum", ["off", "strict", "fuzzy"]),
     ("タイムスタンプ保持",                 "preserve_timestamp",   "bool", None),
     ("空フォルダを削除",                   "remove_empty_dirs",    "bool", None),
     ("ログファイル出力",                   "write_log",            "bool", None),
@@ -1404,6 +1413,12 @@ def _fmt_val(key: str, value) -> str:
     """メニュー表示用の値文字列を返す。"""
     if key == "rar_exe_path":
         return value if value else "(自動検索)"
+    if key == "series_grouping_mode":
+        return {
+            "off": "無効",
+            "strict": "同名のみ",
+            "fuzzy": "類似名も対象",
+        }.get(str(value), str(value))
     if isinstance(value, bool):
         return "有効" if value else "無効"
     return str(value)
@@ -1575,7 +1590,8 @@ def main() -> None:
     # I/Oバウンドな処理なのでスレッドで十分。
     # 同シリーズと思われる連番ファイルは、巻順を保つため同一ワーカーで順番に処理する。
     errors: list[str] = []
-    groups = _build_processing_groups(args, config.get("fuzzy_group_similar_series", False))
+    grouping_mode = config.get("series_grouping_mode", "off")
+    groups = _build_processing_groups(args, grouping_mode)
     n_workers = min(4, len(groups))
 
     def _run(arg: str) -> tuple[str, str]:
@@ -1610,8 +1626,10 @@ def main() -> None:
             if serialized_groups:
                 serialized_count = sum(len(group) for group in serialized_groups)
                 log(f"同シリーズ順番処理: {serialized_count} ファイル / {len(serialized_groups)} グループ")
-                if config.get("fuzzy_group_similar_series", False):
+                if grouping_mode == "fuzzy":
                     log("  類似シリーズ名のまとめ: 有効")
+                elif grouping_mode == "strict":
+                    log("  シリーズ順番処理モード: strict")
             print()
             with ThreadPoolExecutor(max_workers=n_workers) as executor:
                 futures = {executor.submit(_run_group, group): group for group in groups}
