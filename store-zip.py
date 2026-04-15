@@ -96,6 +96,7 @@ except ImportError:
 # これにより並列処理時もファイル単位でログがまとまって表示される。
 # ============================================================
 _thread_local = threading.local()
+_LOG_STATUS_WIDTH = 5
 _LOG_LABEL_WIDTH = 22
 _LOG_LABEL_MAX_WIDTH = 30
 
@@ -142,17 +143,9 @@ def _format_structured_message(msg: str, label_width: int = _LOG_LABEL_WIDTH) ->
 
 
 def _format_status_message(status: str, msg: str) -> str:
-    if "\n" in msg:
-        return f"{msg} [{status}]"
-
-    indent_len = len(msg) - len(msg.lstrip(" "))
-    indent = msg[:indent_len]
-    body = msg[indent_len:]
-    if ":" not in body:
-        return f"{msg} [{status}]"
-
-    label, detail = body.split(":", 1)
-    return _format_structured_message(f"{indent}{label.rstrip()}: {detail.lstrip()} [{status}]")
+    status_prefix = f"{status:<{_LOG_STATUS_WIDTH}} "
+    label_width = max(1, _LOG_LABEL_WIDTH - _display_width(status_prefix))
+    return f"{status_prefix}{_format_structured_message(msg, label_width)}"
 
 
 def log(msg: str) -> None:
