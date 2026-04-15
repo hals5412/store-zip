@@ -122,7 +122,7 @@ def _pad_display(text: str, width: int) -> str:
     return text + " " * max(0, width - _display_width(text))
 
 
-def _format_structured_message(msg: str) -> str:
+def _format_structured_message(msg: str, label_width: int = _LOG_LABEL_WIDTH) -> str:
     """`ラベル: 詳細` 形式のログを見やすく桁揃えする。"""
     if "\n" in msg:
         return msg
@@ -139,11 +139,13 @@ def _format_structured_message(msg: str) -> str:
     if not label or _display_width(label) > _LOG_LABEL_MAX_WIDTH:
         return msg
 
-    return f"{indent}{_pad_display(label, _LOG_LABEL_WIDTH)} : {detail}"
+    return f"{indent}{_pad_display(label, label_width)} : {detail}"
 
 
 def _format_status_message(status: str, msg: str) -> str:
-    return f"{status:<{_LOG_STATUS_WIDTH}} {_format_structured_message(msg)}"
+    status_prefix = f"{status:<{_LOG_STATUS_WIDTH}} "
+    label_width = max(1, _LOG_LABEL_WIDTH - _display_width(status_prefix))
+    return f"{status_prefix}{_format_structured_message(msg, label_width)}"
 
 
 def log(msg: str) -> None:
