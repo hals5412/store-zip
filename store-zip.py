@@ -2,7 +2,7 @@
 store-zip.py v2.0 - 圧縮ファイルを無圧縮ZIPに変換するツール
 
 主な機能:
-  - ZIP / RAR / 7z / tar.gz / CBZ / CBR など主要形式 → 無圧縮ZIP
+  - ZIP / RAR / 7z / tar.gz など主要形式 → 無圧縮ZIP
   - ゴミファイル自動削除（設定ファイル + 対話的判断で管理）
   - 未分類ファイルはユーザーに確認し decisions.json に永続保存
   - ルートに単一フォルダのみの場合は剥がしてフラット化
@@ -166,13 +166,13 @@ def _normalize_series_stem(name: str) -> str:
 
 def _split_series_name_and_order(name: str) -> tuple[str, tuple[int, int, str]]:
     """
-    ファイル名からシリーズ名と巻順ヒントを抽出する。
+    ファイル名からグループ名と順序ヒントを抽出する。
 
     実ログ上は
       - 「タイトル 第01巻」
       - 「タイトル 第02-08巻」
       - 「Title v09」
-    のような末尾巻数パターンが多いため、それを優先的に扱う。
+    のような末尾番号パターンが多いため、それを優先的に扱う。
     """
     stem = _normalize_series_stem(name)
     for pattern in _SERIES_SUFFIX_PATTERNS:
@@ -786,11 +786,11 @@ def extract_with_7zip(sevenzip: str, archive: Path, dest_dir: Path) -> bool:
 
 
 # ============================================================
-# ZIP/CBZ を Python の zipfile で直接展開
+# ZIP 系形式を Python の zipfile で直接展開
 # ============================================================
 def extract_zip_python(archive: Path, dest_dir: Path) -> bool:
     """
-    Python の zipfile モジュールで ZIP/CBZ を展開する。
+    Python の zipfile モジュールで ZIP 系形式を展開する。
 
     7-Zip を使わないため、UNC パスや角括弧を含むパスでも正常に動作する。
     EFS フラグなしの旧日本語 ZIP は CP932 でファイル名を再デコードする。
@@ -949,7 +949,7 @@ def remove_junk_from_dir(extract_dir: Path, config: dict, exe_dir: Path) -> int:
 def is_already_store_zip(archive_path: Path) -> bool:
     """
     ZIPファイルの全エントリが STORE（無圧縮）なら True を返す。
-    ZIP/CBZ 以外は常に False（処理対象）。
+    ZIP 系形式以外は常に False（処理対象）。
     """
     if archive_path.suffix.lower() not in {".zip", ".cbz"}:
         return False
@@ -1265,10 +1265,10 @@ def process_file(
         extract_dir.mkdir()
 
         # ── 展開 ──────────────────────────────────────────────
-        # ZIP/CBZ → Python zipfile で直接展開（ワイルドカード問題なし）。
-        #           BadZipFile（実体が RAR 等）の場合は一時コピー経由で再試行。
-        #           一時コピー時にマジックバイトで実フォーマットを検出し
-        #           正しい拡張子でコピーすることで -mcp=932 の誤適用を防ぐ。
+        # ZIP 系形式 → Python zipfile で直接展開（ワイルドカード問題なし）。
+        #              BadZipFile（実体が RAR 等）の場合は一時コピー経由で再試行。
+        #              一時コピー時にマジックバイトで実フォーマットを検出し
+        #              正しい拡張子でコピーすることで -mcp=932 の誤適用を防ぐ。
         # RAR/7z 等 → 直接 7-Zip で展開（UNC/角括弧パスも問題なし）。
         ok = False
         if archive_path.suffix.lower() in _ZIP_LIKE_EXTENSIONS:
