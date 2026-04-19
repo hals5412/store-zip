@@ -328,6 +328,8 @@ DEFAULT_CONFIG: dict = {
     "preserve_timestamp": True,
     "remove_empty_dirs": True,
     "write_log": False,
+    # 並列処理ワーカー数（1〜4）
+    "parallel_workers": 4,
     # 0 = 制限なし
     "file_list_limit": 0,
     # "zip" : 無圧縮 ZIP（デフォルト）
@@ -371,6 +373,7 @@ def load_config(exe_dir: Path) -> dict:
         "preserve_timestamp":    DEFAULT_CONFIG["preserve_timestamp"],
         "remove_empty_dirs":     DEFAULT_CONFIG["remove_empty_dirs"],
         "write_log":             DEFAULT_CONFIG["write_log"],
+        "parallel_workers":      DEFAULT_CONFIG["parallel_workers"],
         "file_list_limit":       DEFAULT_CONFIG["file_list_limit"],
         "output_format":         DEFAULT_CONFIG["output_format"],
         "rar_recovery_record":   DEFAULT_CONFIG["rar_recovery_record"],
@@ -390,7 +393,7 @@ def load_config(exe_dir: Path) -> dict:
                 if k in cfg:
                     config[k] = list(cfg[k])
             for k in ("unknown_file_action", "duplicate_name_style", "write_log",
-                      "preserve_timestamp", "remove_empty_dirs", "file_list_limit",
+                      "preserve_timestamp", "remove_empty_dirs", "parallel_workers", "file_list_limit",
                       "output_format", "rar_recovery_record", "rar_exe_path",
                       "skip_if_same_size", "force_reprocess_store_zip",
                       "series_grouping_mode"):
@@ -452,6 +455,15 @@ def _normalize_config(config: dict) -> dict:
     for key in ("preserve_timestamp", "remove_empty_dirs", "write_log",
                 "skip_if_same_size", "force_reprocess_store_zip"):
         normalized[key] = bool(normalized.get(key, DEFAULT_CONFIG[key]))
+
+    try:
+        workers = int(normalized.get("parallel_workers", DEFAULT_CONFIG["parallel_workers"]))
+    except (TypeError, ValueError):
+        log("警告: parallel_workers が不正です。4 に戻します。")
+        workers = DEFAULT_CONFIG["parallel_workers"]
+    normalized["parallel_workers"] = min(4, max(1, workers))
+    if workers != normalized["parallel_workers"]:
+        log("警告: parallel_workers は 1〜4 の範囲で指定してください。範囲内に補正します。")
 
     try:
         normalized["file_list_limit"] = max(0, int(normalized.get("file_list_limit", 0)))
@@ -1397,6 +1409,7 @@ _SETTINGS_DEFS = [
     ("出力フォーマット",                   "output_format",        "enum", ["zip", "rar"]),
     ("無圧縮ZIPを常に再処理",             "force_reprocess_store_zip", "bool", None),
     ("シリーズ順番処理",                   "series_grouping_mode", "enum", ["off", "strict", "fuzzy"]),
+    ("並列処理数 (1-4)",                  "parallel_workers",     "int",  None),
     ("タイムスタンプ保持",                 "preserve_timestamp",   "bool", None),
     ("空フォルダを削除",                   "remove_empty_dirs",    "bool", None),
     ("ログファイル出力",                   "write_log",            "bool", None),
@@ -1516,7 +1529,11 @@ def _settings_menu(exe_dir: Path) -> None:
                 pass
             else:
                 try:
-                    config[key] = int(raw)
+                    value = int(raw)
+                    if key == "parallel_workers" and not (1 <= value <= 4):
+                        print("  1 から 4 の範囲で入力してください。")
+                        continue
+                    config[key] = value
                     changed = True
                 except ValueError:
                     print("  整数を入力してください。")
@@ -1592,7 +1609,8 @@ def main() -> None:
     errors: list[str] = []
     grouping_mode = config.get("series_grouping_mode", "off")
     groups = _build_processing_groups(args, grouping_mode)
-    n_workers = min(4, len(groups))
+    max_workers = config.get("parallel_workers", DEFAULT_CONFIG["parallel_workers"])
+    n_workers = min(max_workers, len(groups))
 
     def _run(arg: str) -> tuple[str, str]:
         """1ファイルをバッファ付きで処理し (name, status) を返す。"""
@@ -1622,7 +1640,7 @@ def main() -> None:
         if len(args) == 1:
             results.append(_run(args[0]))
         else:
-            log(f"並列処理開始: {len(args)} ファイル / {n_workers} ワーカー")
+            log(f"並列処理開始: {len(args)} ファイル / {n_workers} ワーカー (設定上限: {max_workers})")
             if serialized_groups:
                 serialized_count = sum(len(group) for group in serialized_groups)
                 log(f"同シリーズ順番処理: {serialized_count} ファイル / {len(serialized_groups)} グループ")
